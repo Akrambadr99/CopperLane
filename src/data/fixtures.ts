@@ -19,7 +19,7 @@ export function createAtlasFixtures(
 
   const workspace = {
     id: ids.workspace('operations'),
-    name: 'Taskora Workspace',
+    name: 'Flowento Workspace',
     slug: 'atlas-operations',
     createdAt,
   }
