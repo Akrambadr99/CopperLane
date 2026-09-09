@@ -35,7 +35,7 @@ export function AppShell() {
         <p className="page-eyebrow">Session security</p>
         <h1>Workspace access changed</h1>
         <p>
-          Your membership is no longer active. Flowento removed workspace data
+          Your membership is no longer active. CopperLane removed workspace data
           from the active view.
         </p>
         <button
@@ -57,7 +57,7 @@ export function AppShell() {
         <p className="page-eyebrow">Session security</p>
         <h1>Permissions could not be verified</h1>
         <p>
-          Flowento removed workspace data from this view until your access can
+          CopperLane removed workspace data from this view until your access can
           be confirmed.
         </p>
         <button
@@ -80,11 +80,11 @@ export function AppShell() {
       </a>
 
       <aside className="app-sidebar">
-        <Link className="app-brand" to="/" aria-label="Flowento dashboard">
+        <Link className="app-brand" to="/" aria-label="CopperLane dashboard">
           <span className="app-brand__mark" aria-hidden="true">
-            FE
+            CL
           </span>
-          <span>Flowento</span>
+          <span>CopperLane</span>
         </Link>
 
         <PrimaryNavigation />
@@ -111,7 +111,7 @@ export function AppShell() {
         <header className="app-topbar">
           <div>
             <p className="app-topbar__label">Keep progress moving</p>
-            <p className="app-topbar__name">Flowento Workspace</p>
+            <p className="app-topbar__name">CopperLane Workspace</p>
           </div>
           <GlobalSearch />
           <NotificationCenter />

@@ -11,7 +11,7 @@ export function RouteErrorBoundary() {
   const detail =
     error instanceof Error && import.meta.env.DEV
       ? error.message
-      : 'Flowento could not load this view. Return to the dashboard and try again.'
+      : 'CopperLane could not load this view. Return to the dashboard and try again.'
 
   return (
     <main className="error-page" role="alert">

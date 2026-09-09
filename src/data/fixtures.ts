@@ -19,7 +19,7 @@ export function createAtlasFixtures(
 
   const workspace = {
     id: ids.workspace('operations'),
-    name: 'Flowento Workspace',
+    name: 'CopperLane Workspace',
     slug: 'atlas-operations',
     createdAt,
   }
