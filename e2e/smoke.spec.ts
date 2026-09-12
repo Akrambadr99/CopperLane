@@ -215,3 +215,14 @@ test('released submittal package completes only after its field inspection passe
  await actor.selectOption('actor-0');await page.getByRole('button',{name:/^Submittal packages/}).click();await page.getByRole('button',{name:'Complete released package'}).click();await save();await page.reload();
  await page.getByRole('button',{name:/^Submittal packages/}).click();await expect(page.locator('.detail-title')).toContainText('completed');await expect(page.locator('.detail')).toContainText('package-inspection · passed');
 });
+
+test('verified commercial evidence controls payment review certification and disbursement',async({page})=>{
+ await page.goto('/operations');const actor=page.getByRole('combobox',{name:'Current actor'}),dialog=page.getByRole('dialog');const save=async()=>{await dialog.getByRole('button',{name:'Save command',exact:true}).click();await expect(dialog).toHaveCount(0)};
+ await actor.selectOption('actor-3');await page.getByRole('button',{name:/^Payment applications/}).click();await page.getByRole('button',{name:'Create payment applications'}).click();
+ await dialog.getByLabel('Record title').fill('August progress application');await dialog.getByLabel('Contract').selectOption('contract-1');await dialog.getByLabel('Gross amount (cents)').fill('2500000');await dialog.getByLabel('Retainage percent').fill('10');await save();
+ await page.getByRole('button',{name:'Prepare payment evidence'}).click();await dialog.getByLabel('Lien waiver evidence').fill('Signed conditional lien waiver for August progress.');await dialog.getByLabel('Installed progress evidence').fill('Measured slab installation reached the approved quantity.');await save();
+ await page.getByRole('button',{name:/^Payment evidence/}).click();await actor.selectOption('actor-1');await page.getByRole('button',{name:'Verify payment evidence'}).click();await dialog.getByLabel('Evidence review').fill('Measured quantities and waiver evidence reconcile to the application.');await save();
+ await page.getByRole('button',{name:/^Payment applications/}).click();await actor.selectOption('actor-3');await page.getByRole('button',{name:'Review measured quantities'}).click();await save();
+ await actor.selectOption('actor-1');await page.getByRole('button',{name:'Certify payment'}).click();await save();await actor.selectOption('actor-0');await page.getByRole('button',{name:'Disburse certified payment'}).click();await dialog.getByLabel('Disbursement reference').fill('Bank instruction BL-2026-08-001 was confirmed for release.');await save();await page.reload();
+ await page.getByRole('button',{name:/^Payment applications/}).click();await expect(page.locator('.detail-title')).toContainText('paid');await expect(page.locator('.detail')).toContainText('Certified payment disbursed with verified evidence retained');
+});

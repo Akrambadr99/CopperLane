@@ -1,6 +1,7 @@
 import { submittalKind, submittalOperations } from '../document-control/submittal-workflow';
 import { closeoutKinds, closeoutOperations, requireConstructionCloseoutReady, validateConstructionCloseout } from '../project-controls/closeout-workflows';
 import { packageKinds, packageOperations, requirePackagesReadyForHandoff, validatePackages } from '../construction-packages/package-workflow';
+import { paymentEvidenceKind, paymentEvidenceOperations, requireVerifiedPaymentEvidence, validatePaymentEvidence } from '../commercial-controls/payment-evidence';
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import type { Product, Kind, Field, Operation, Entity } from '../workspace/types';
 import { entity, find, rows, total, text, number, requireThat, money } from '../workspace/values';
@@ -34,6 +35,16 @@ const operations: Operation[] = [{ key: 'issue', label: 'Issue construction draw
             entity.status = 'issued';
             return 'Issued immutable drawing revision and superseded its predecessor.';
         } }, { key: 'inspect', label: 'Complete field inspection', kind: 'inspection', from: ['open'], roles: [roles[2]!], fields: [choice('result', 'Inspection result', ['passed', 'failed'])], run: ({ state, entity, input }) => { requireThat(find(state.entities, text(entity.fields, 'drawing'), 'drawing').status === 'issued', 'Inspection must reference an issued drawing.'); entity.status = text(input, 'result'); return 'Inspection completed against its historical drawing revision.'; } }, { key: 'price', label: 'Complete contractor pricing', kind: 'change', from: ['draft'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'priced'; return 'Commercial pricing completed.'; } }, { key: 'approve', label: 'Approve funded change', kind: 'change', from: ['priced'], roles: [roles[0]!], run: ({ state, entity }) => { const contract = find(state.entities, text(entity.fields, 'contract')); const approved = total(rows(state.entities, 'change').filter(row => ['approved', 'executed'].includes(row.status) && row.fields['contract'] === contract.id), 'cost'); requireThat(approved + number(entity.fields, 'cost') <= number(contract.fields, 'contingency'), 'Change exceeds remaining contract contingency.'); entity.status = 'approved'; return 'Owner approved change against remaining contingency.'; } }, { key: 'execute', label: 'Execute approved change', kind: 'change', from: ['approved'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'executed'; return 'Approved change incorporated into forecast.'; } }, { key: 'review', label: 'Review measured quantities', kind: 'payment', from: ['submitted'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'reviewed'; return 'Measured quantities reviewed.'; } }, { key: 'certify', label: 'Certify payment', kind: 'payment', from: ['reviewed'], roles: [roles[1]!, roles[3]!], run: ({ state, entity }) => { const contract = find(state.entities, text(entity.fields, 'contract')); const certified = total(rows(state.entities, 'payment').filter(row => ['certified', 'paid'].includes(row.status) && row.fields['contract'] === contract.id), 'gross'); requireThat(certified + number(entity.fields, 'gross') <= number(contract.fields, 'value'), 'Certification exceeds contract value.'); entity.status = 'certified'; return 'Payment certified after value control.'; } }];
+for (const key of ['review', 'certify']) {
+    const operation = operations.find(item => item.key === key && item.kind === 'payment');
+    if (operation) {
+        const run = operation.run;
+        operation.run = context => {
+            requireVerifiedPaymentEvidence(context.state.entities, context.entity);
+            return run(context);
+        };
+    }
+}
 const seed = [entity('contract-1', 'contract', 'Central station renewal', 'active', { value: 100000000, contingency: 10000000, completion: '2027-06-30' }), entity('drawing-1', 'drawing', 'Structural slab plan · A', 'draft', { contract: 'contract-1', document: 'STR-201', revision: 'A', checksum: 'sha256:59ac' }), entity('change-1', 'change', 'Relocate service riser', 'draft', { contract: 'contract-1', cost: 1500000, days: 8, scope: 'Coordinate revised MEP riser route' })];
 kinds.push(kind('rfi', 'Requests for information', ['draft', 'submitted', 'rejected', 'approved', 'issued', 'superseded'], [], [
     ref('drawing', 'Referenced drawing', 'drawing'), num('drawingVersion', 'Pinned drawing version', 1, 1),
@@ -168,9 +179,12 @@ kinds.push(...closeoutKinds);
 operations.push(...closeoutOperations);
 kinds.push(...packageKinds);
 operations.push(...packageOperations);
+kinds.push(paymentEvidenceKind);
+operations.push(...paymentEvidenceOperations);
 const validate: Product['validate'] = entities => {
     validateConstructionCloseout(entities);
     validatePackages(entities);
+    validatePaymentEvidence(entities);
     for (const handoff of rows(entities, 'handoff').filter(item => item.status === 'approved')) {
         const contract = find(entities, text(handoff.fields, 'contract'), 'contract');
         requireThat(contract.status === 'closed', 'Approved handoff requires a closed contract.');
