@@ -1,1 +1,46 @@
 import{expect,test}from'@playwright/test';test('BuildLedger exposes routed enterprise workflows',async({page})=>{await page.goto('/');await expect(page.getByRole('heading',{name:'BuildLedger command center'})).toBeVisible();await page.getByRole('link',{name:'Operations'}).click();await expect(page.getByRole('region',{name:'Drawing revision comparison'})).toBeVisible();await page.getByRole('link',{name:'Workflows'}).click();await expect(page.getByRole('heading',{name:'Workflow catalog'})).toBeVisible();await page.getByRole('link',{name:'Data model'}).click();await expect(page.getByRole('heading',{name:'Connected data model'})).toBeVisible();await page.getByRole('link',{name:'Data tools'}).click();await expect(page.getByRole('heading',{name:'Import and recovery tools'})).toBeVisible();await page.getByRole('textbox',{name:'Workspace JSON'}).fill('{}');await page.getByRole('button',{name:'Preview import'}).click();await expect(page.getByRole('alert')).toContainText('not a compatible');await page.getByRole('link',{name:'Activity',exact:true}).click();await expect(page.getByRole('heading',{name:'Operational activity'})).toBeVisible()})
+
+test('RFI rejection, revision and issue persist across reload', async ({ page }) => {
+  await page.goto('/operations');
+  const actor = page.getByRole('combobox', { name: 'Current actor' });
+  const save = async () => { await page.getByRole('button', { name: 'Save command', exact: true }).click(); await expect(page.getByRole('dialog')).toHaveCount(0); };
+  await actor.selectOption('actor-1');
+  await page.getByRole('button', { name: /^Drawing revisions/ }).click();
+  await page.getByRole('button', { name: 'Issue construction drawing', exact: true }).click();
+  await save();
+  await actor.selectOption('actor-2');
+  await page.getByRole('button', { name: 'Open RFI', exact: true }).click();
+  await page.getByLabel('RFI question', { exact: true }).fill('Confirm the structural connection at grid four.');
+  await save();
+  await page.getByRole('button', { name: /^Requests for information/ }).click();
+  await page.getByRole('button', { name: 'Submit RFI', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Submit RFI', exact: true })).toBeFocused();
+  await page.getByRole('button', { name: 'Submit RFI', exact: true }).click();
+  await save();
+  await actor.selectOption('actor-1');
+  await page.getByRole('button', { name: 'Reject RFI', exact: true }).click();
+  await page.getByLabel('Rejection reason', { exact: true }).fill('Please clarify the proposed connection detail.');
+  await save();
+  await actor.selectOption('actor-2');
+  await page.getByRole('button', { name: 'Revise RFI', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Referenced drawing', exact: true }).selectOption('drawing-1');
+  await page.getByLabel('Revised question', { exact: true }).fill('Confirm detail four on the structural slab plan.');
+  await save();
+  await page.getByRole('button', { name: 'Submit RFI', exact: true }).click();
+  await save();
+  await actor.selectOption('actor-1');
+  await page.getByRole('button', { name: 'Approve RFI', exact: true }).click();
+  await page.getByLabel('Architect response', { exact: true }).fill('short');
+  await page.getByRole('button', { name: 'Save command', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('specific architectural response');
+  await page.getByLabel('Architect response', { exact: true }).fill('Use detail four on the issued slab plan.');
+  await save();
+  await page.getByRole('button', { name: 'Issue RFI response', exact: true }).click();
+  await save();
+  await expect(page.getByRole('status')).toContainText('RFI response issued');
+  await page.reload();
+  await page.getByRole('button', { name: /^Requests for information/ }).click();
+  await expect(page.locator('.detail-title')).toContainText('issued');
+  await expect(page.locator('.detail')).toContainText('Use detail four on the issued slab plan.');
+});

@@ -32,6 +32,66 @@ const operations: Operation[] = [{ key: 'issue', label: 'Issue construction draw
             return 'Issued immutable drawing revision and superseded its predecessor.';
         } }, { key: 'inspect', label: 'Complete field inspection', kind: 'inspection', from: ['open'], roles: [roles[2]!], fields: [choice('result', 'Inspection result', ['passed', 'failed'])], run: ({ state, entity, input }) => { requireThat(find(state.entities, text(entity.fields, 'drawing'), 'drawing').status === 'issued', 'Inspection must reference an issued drawing.'); entity.status = text(input, 'result'); return 'Inspection completed against its historical drawing revision.'; } }, { key: 'price', label: 'Complete contractor pricing', kind: 'change', from: ['draft'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'priced'; return 'Commercial pricing completed.'; } }, { key: 'approve', label: 'Approve funded change', kind: 'change', from: ['priced'], roles: [roles[0]!], run: ({ state, entity }) => { const contract = find(state.entities, text(entity.fields, 'contract')); const approved = total(rows(state.entities, 'change').filter(row => ['approved', 'executed'].includes(row.status) && row.fields['contract'] === contract.id), 'cost'); requireThat(approved + number(entity.fields, 'cost') <= number(contract.fields, 'contingency'), 'Change exceeds remaining contract contingency.'); entity.status = 'approved'; return 'Owner approved change against remaining contingency.'; } }, { key: 'execute', label: 'Execute approved change', kind: 'change', from: ['approved'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'executed'; return 'Approved change incorporated into forecast.'; } }, { key: 'review', label: 'Review measured quantities', kind: 'payment', from: ['submitted'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'reviewed'; return 'Measured quantities reviewed.'; } }, { key: 'certify', label: 'Certify payment', kind: 'payment', from: ['reviewed'], roles: [roles[1]!, roles[3]!], run: ({ state, entity }) => { const contract = find(state.entities, text(entity.fields, 'contract')); const certified = total(rows(state.entities, 'payment').filter(row => ['certified', 'paid'].includes(row.status) && row.fields['contract'] === contract.id), 'gross'); requireThat(certified + number(entity.fields, 'gross') <= number(contract.fields, 'value'), 'Certification exceeds contract value.'); entity.status = 'certified'; return 'Payment certified after value control.'; } }];
 const seed = [entity('contract-1', 'contract', 'Central station renewal', 'active', { value: 100000000, contingency: 10000000, completion: '2027-06-30' }), entity('drawing-1', 'drawing', 'Structural slab plan · A', 'draft', { contract: 'contract-1', document: 'STR-201', revision: 'A', checksum: 'sha256:59ac' }), entity('change-1', 'change', 'Relocate service riser', 'draft', { contract: 'contract-1', cost: 1500000, days: 8, scope: 'Coordinate revised MEP riser route' })];
+kinds.push(kind('rfi', 'Requests for information', ['draft', 'submitted', 'rejected', 'approved', 'issued'], [], [
+    ref('drawing', 'Referenced drawing', 'drawing'), num('drawingVersion', 'Pinned drawing version', 1, 1),
+    txt('question', 'Question'), txt('response', 'Response'), txt('owner', 'Submitting actor'),
+    txt('decision', 'Review decision'),
+]));
+operations.push(
+    { key: 'rfi-open', label: 'Open RFI', kind: 'drawing', from: ['issued'], roles: [roles[2]!, roles[3]!],
+        fields: [txt('question', 'RFI question')], run: ({ entity, actor, input, add }) => {
+            requireThat(text(input, 'question').trim().length >= 12, 'Describe the RFI question in at least 12 characters.');
+            add('rfi', 'RFI · ' + entity.title, { drawing: entity.id, drawingVersion: entity.revision,
+                question: text(input, 'question').trim(), response: 'Awaiting response', owner: actor.id, decision: 'Awaiting review' });
+            return 'RFI draft opened with a pinned drawing reference.';
+        } },
+    { key: 'rfi-revise', label: 'Revise RFI', kind: 'rfi', from: ['draft', 'rejected'], roles: [roles[2]!, roles[3]!],
+        fields: [ref('drawing', 'Referenced drawing', 'drawing'), txt('question', 'Revised question')], run: ({ state, entity, actor, input }) => {
+            requireThat(entity.fields['owner'] === actor.id, 'Only the submitting actor can revise this RFI.');
+            const drawing = find(state.entities, text(input, 'drawing'), 'drawing');
+            requireThat(drawing.status === 'issued', 'Choose a currently issued drawing.');
+            requireThat(text(input, 'question').trim().length >= 12, 'Describe the RFI question in at least 12 characters.');
+            entity.fields['drawing'] = drawing.id;
+            entity.fields['drawingVersion'] = drawing.revision;
+            entity.fields['question'] = text(input, 'question').trim();
+            entity.fields['response'] = 'Awaiting response';
+            entity.fields['decision'] = 'Awaiting review';
+            entity.status = 'draft';
+            return 'RFI revised against the current drawing; prior decisions remain in audit history.';
+        } },
+    { key: 'rfi-submit', label: 'Submit RFI', kind: 'rfi', from: ['draft'], roles: [roles[2]!, roles[3]!],
+        run: ({ state, entity, actor }) => {
+            requireThat(entity.fields['owner'] === actor.id, 'Only the submitting actor can submit this RFI.');
+            const drawing = find(state.entities, text(entity.fields, 'drawing'), 'drawing');
+            requireThat(drawing.status === 'issued' && drawing.revision === entity.fields['drawingVersion'], 'Drawing changed. Revise the RFI against its current issued revision.');
+            entity.status = 'submitted';
+            return 'RFI submitted for architectural review.';
+        } },
+    { key: 'rfi-reject', label: 'Reject RFI', kind: 'rfi', from: ['submitted', 'approved'], roles: [roles[1]!],
+        fields: [txt('reason', 'Rejection reason')], run: ({ entity, input }) => {
+            requireThat(text(input, 'reason').trim().length >= 12, 'Provide a specific rejection reason.');
+            entity.fields['decision'] = text(input, 'reason').trim();
+            entity.status = 'rejected';
+            return 'RFI rejected: ' + text(input, 'reason').trim();
+        } },
+    { key: 'rfi-approve', label: 'Approve RFI', kind: 'rfi', from: ['submitted'], roles: [roles[1]!],
+        fields: [txt('response', 'Architect response')], run: ({ state, entity, input }) => {
+            const drawing = find(state.entities, text(entity.fields, 'drawing'), 'drawing');
+            requireThat(drawing.status === 'issued' && drawing.revision === entity.fields['drawingVersion'], 'Drawing changed. Reject for revision before approving.');
+            requireThat(text(input, 'response').trim().length >= 12, 'Provide a specific architectural response.');
+            entity.fields['response'] = text(input, 'response').trim();
+            entity.fields['decision'] = 'Approved';
+            entity.status = 'approved';
+            return 'RFI approved: ' + text(input, 'response').trim();
+        } },
+    { key: 'rfi-issue', label: 'Issue RFI response', kind: 'rfi', from: ['approved'], roles: [roles[1]!],
+        run: ({ state, entity }) => {
+            const drawing = find(state.entities, text(entity.fields, 'drawing'), 'drawing');
+            requireThat(drawing.status === 'issued' && drawing.revision === entity.fields['drawingVersion'], 'Drawing changed. Reject for revision before issuing.');
+            entity.status = 'issued';
+            return 'RFI response issued against pinned drawing ' + drawing.title + ': ' + text(entity.fields, 'response');
+        } },
+);
 const validate: Product['validate'] = entities => {
     for (const contract of rows(entities, 'contract'))
         requireThat(total(rows(entities, 'change').filter(row => ['approved', 'executed'].includes(row.status) && row.fields['contract'] === contract.id), 'cost') <= number(contract.fields, 'contingency'), 'Approved changes exceed contingency.');
