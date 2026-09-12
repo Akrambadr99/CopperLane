@@ -2,8 +2,10 @@ import { readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 
-const maximumRawBytes = 335 * 1024
-const maximumGzipBytes = 105 * 1024
+// Phase 3 adds synchronous construction policies to the command registry.
+// Keep a bounded ceiling while allowing the product domain to expand.
+const maximumRawBytes = 450 * 1024
+const maximumGzipBytes = 130 * 1024
 const outputDirectory = join(process.cwd(), 'dist')
 const html = await readFile(join(outputDirectory, 'index.html'), 'utf8')
 const entryMatch = html.match(/<script[^>]+src="\/([^"?]+\.js)"/)

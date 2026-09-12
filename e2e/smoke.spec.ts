@@ -195,3 +195,23 @@ test('punch correction requires independent verification and survives reload', a
   await expect(page.locator('.detail-title')).toContainText('verified');
   await expect(page.locator('.detail')).toContainText('signed torque report');
 });
+
+test('released submittal package completes only after its field inspection passes',async({page})=>{
+ await page.goto('/operations');const actor=page.getByRole('combobox',{name:'Current actor'}),dialog=page.getByRole('dialog');
+ const save=async()=>{await dialog.getByRole('button',{name:'Save command',exact:true}).click();await expect(dialog).toHaveCount(0)};
+ await actor.selectOption('actor-1');await page.getByRole('button',{name:/^Drawing revisions/}).click();await page.getByRole('button',{name:'Issue construction drawing'}).click();await save();
+ await actor.selectOption('actor-2');await page.getByRole('button',{name:'Open submittal'}).click();await dialog.getByLabel('Submittal narrative').fill('Structural slab material and installation evidence package.');await save();
+ await page.getByRole('button',{name:/^Submittals/}).click();await page.getByRole('button',{name:'Submit submittal'}).click();await save();
+ await actor.selectOption('actor-1');await page.getByRole('button',{name:'Approve submittal review'}).click();await dialog.getByLabel('Submittal narrative').fill('Package evidence matches the current issued structural drawing.');await save();
+ await actor.selectOption('actor-0');await page.getByRole('button',{name:'Release reviewed submittal'}).click();await save();
+ await actor.selectOption('actor-3');await page.getByRole('button',{name:/^Contracts/}).click();await page.getByRole('button',{name:'Open submittal package'}).click();
+ await dialog.getByLabel('Package scope').fill('Structural slab material and coordinated installation release.');await dialog.getByLabel('Required submittal IDs').selectOption({index:1});await save();
+ await page.getByRole('button',{name:/^Submittal packages/}).click();await page.getByRole('button',{name:'Submit submittal package'}).click();await save();
+ await actor.selectOption('actor-1');await page.getByRole('button',{name:'Approve submittal package'}).click();await dialog.getByLabel('Architect review').fill('Dependencies satisfy the coordinated architectural release requirements.');await save();
+ await actor.selectOption('actor-0');await page.getByRole('button',{name:'Release submittal package'}).click();await save();
+ await actor.selectOption('actor-2');await page.getByRole('button',{name:'Schedule package inspection'}).click();await dialog.getByLabel('Scheduled date').fill('2026-09-20');await save();
+ await page.getByRole('button',{name:/^Package inspections/}).click();await page.getByRole('button',{name:'Submit package inspection readiness'}).click();await dialog.getByLabel('Readiness evidence').fill('Installed work and signed field checklist are available.');await save();
+ await actor.selectOption('actor-1');await page.getByRole('button',{name:'Complete package inspection'}).click();await dialog.getByLabel('Inspection result').selectOption('passed');await dialog.getByLabel('Inspection note').fill('Field work matches the released coordinated package evidence.');await save();
+ await actor.selectOption('actor-0');await page.getByRole('button',{name:/^Submittal packages/}).click();await page.getByRole('button',{name:'Complete released package'}).click();await save();await page.reload();
+ await page.getByRole('button',{name:/^Submittal packages/}).click();await expect(page.locator('.detail-title')).toContainText('completed');await expect(page.locator('.detail')).toContainText('package-inspection · passed');
+});
