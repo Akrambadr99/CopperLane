@@ -32,10 +32,10 @@ const operations: Operation[] = [{ key: 'issue', label: 'Issue construction draw
             return 'Issued immutable drawing revision and superseded its predecessor.';
         } }, { key: 'inspect', label: 'Complete field inspection', kind: 'inspection', from: ['open'], roles: [roles[2]!], fields: [choice('result', 'Inspection result', ['passed', 'failed'])], run: ({ state, entity, input }) => { requireThat(find(state.entities, text(entity.fields, 'drawing'), 'drawing').status === 'issued', 'Inspection must reference an issued drawing.'); entity.status = text(input, 'result'); return 'Inspection completed against its historical drawing revision.'; } }, { key: 'price', label: 'Complete contractor pricing', kind: 'change', from: ['draft'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'priced'; return 'Commercial pricing completed.'; } }, { key: 'approve', label: 'Approve funded change', kind: 'change', from: ['priced'], roles: [roles[0]!], run: ({ state, entity }) => { const contract = find(state.entities, text(entity.fields, 'contract')); const approved = total(rows(state.entities, 'change').filter(row => ['approved', 'executed'].includes(row.status) && row.fields['contract'] === contract.id), 'cost'); requireThat(approved + number(entity.fields, 'cost') <= number(contract.fields, 'contingency'), 'Change exceeds remaining contract contingency.'); entity.status = 'approved'; return 'Owner approved change against remaining contingency.'; } }, { key: 'execute', label: 'Execute approved change', kind: 'change', from: ['approved'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'executed'; return 'Approved change incorporated into forecast.'; } }, { key: 'review', label: 'Review measured quantities', kind: 'payment', from: ['submitted'], roles: [roles[3]!], run: ({ entity }) => { entity.status = 'reviewed'; return 'Measured quantities reviewed.'; } }, { key: 'certify', label: 'Certify payment', kind: 'payment', from: ['reviewed'], roles: [roles[1]!, roles[3]!], run: ({ state, entity }) => { const contract = find(state.entities, text(entity.fields, 'contract')); const certified = total(rows(state.entities, 'payment').filter(row => ['certified', 'paid'].includes(row.status) && row.fields['contract'] === contract.id), 'gross'); requireThat(certified + number(entity.fields, 'gross') <= number(contract.fields, 'value'), 'Certification exceeds contract value.'); entity.status = 'certified'; return 'Payment certified after value control.'; } }];
 const seed = [entity('contract-1', 'contract', 'Central station renewal', 'active', { value: 100000000, contingency: 10000000, completion: '2027-06-30' }), entity('drawing-1', 'drawing', 'Structural slab plan · A', 'draft', { contract: 'contract-1', document: 'STR-201', revision: 'A', checksum: 'sha256:59ac' }), entity('change-1', 'change', 'Relocate service riser', 'draft', { contract: 'contract-1', cost: 1500000, days: 8, scope: 'Coordinate revised MEP riser route' })];
-kinds.push(kind('rfi', 'Requests for information', ['draft', 'submitted', 'rejected', 'approved', 'issued'], [], [
+kinds.push(kind('rfi', 'Requests for information', ['draft', 'submitted', 'rejected', 'approved', 'issued', 'superseded'], [], [
     ref('drawing', 'Referenced drawing', 'drawing'), num('drawingVersion', 'Pinned drawing version', 1, 1),
     txt('question', 'Question'), txt('response', 'Response'), txt('owner', 'Submitting actor'),
-    txt('decision', 'Review decision'),
+    txt('decision', 'Review decision'), { ...ref('predecessor', 'Previous RFI response', 'rfi'), required: false },
 ]));
 operations.push(
     { key: 'rfi-open', label: 'Open RFI', kind: 'drawing', from: ['issued'], roles: [roles[2]!, roles[3]!],
@@ -90,6 +90,19 @@ operations.push(
             requireThat(drawing.status === 'issued' && drawing.revision === entity.fields['drawingVersion'], 'Drawing changed. Reject for revision before issuing.');
             entity.status = 'issued';
             return 'RFI response issued against pinned drawing ' + drawing.title + ': ' + text(entity.fields, 'response');
+        } },
+    { key: 'rfi-supersede', label: 'Supersede issued RFI response', kind: 'rfi', from: ['issued'], roles: [roles[1]!],
+        fields: [ref('drawing', 'Current drawing revision', 'drawing'), txt('reason', 'Supersession reason')], run: ({ state, entity, input, add }) => {
+            const previousDrawing = find(state.entities, text(entity.fields, 'drawing'), 'drawing');
+            const currentDrawing = find(state.entities, text(input, 'drawing'), 'drawing');
+            requireThat(currentDrawing.status === 'issued' && currentDrawing.id !== previousDrawing.id && currentDrawing.fields['document'] === previousDrawing.fields['document'], 'Choose a newer issued revision of the same drawing document.');
+            requireThat(text(input, 'reason').trim().length >= 12, 'Provide a specific supersession reason.');
+            requireThat(!rows(state.entities, 'rfi').some(item => item.fields['predecessor'] === entity.id && item.status !== 'superseded'), 'An active successor already exists for this RFI response.');
+            entity.status = 'superseded';
+            add('rfi', 'RFI revision · ' + currentDrawing.title, { drawing: currentDrawing.id, drawingVersion: currentDrawing.revision,
+                question: text(entity.fields, 'question'), response: 'Awaiting response', owner: text(entity.fields, 'owner'),
+                decision: 'Superseded because: ' + text(input, 'reason').trim(), predecessor: entity.id });
+            return 'Issued response superseded; a successor draft was created against the current drawing while the prior response remains in history.';
         } },
 );
 function handoffEvidence(entities: Entity[], contractId: string) {

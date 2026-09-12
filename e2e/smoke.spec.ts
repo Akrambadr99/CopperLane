@@ -45,6 +45,45 @@ test('RFI rejection, revision and issue persist across reload', async ({ page })
   await expect(page.locator('.detail')).toContainText('Use detail four on the issued slab plan.');
 });
 
+test('issued RFI response creates one successor against the current drawing revision', async ({ page }) => {
+  await page.goto('/operations');
+  const actor = page.getByRole('combobox', { name: 'Current actor' });
+  const dialog = page.getByRole('dialog');
+  const save = async () => { await dialog.getByRole('button', { name: 'Save command', exact: true }).click(); await expect(dialog).toHaveCount(0); };
+  await actor.selectOption('actor-1');
+  await page.getByRole('button', { name: /^Drawing revisions/ }).click();
+  await page.getByRole('button', { name: 'Issue construction drawing', exact: true }).click(); await save();
+  await actor.selectOption('actor-2');
+  await page.getByRole('button', { name: 'Open RFI', exact: true }).click();
+  await dialog.getByLabel('RFI question', { exact: true }).fill('Confirm the current structural connection detail.'); await save();
+  await page.getByRole('button', { name: /^Requests for information/ }).click();
+  await page.getByRole('button', { name: 'Submit RFI', exact: true }).click(); await save();
+  await actor.selectOption('actor-1');
+  await page.getByRole('button', { name: 'Approve RFI', exact: true }).click();
+  await dialog.getByLabel('Architect response', { exact: true }).fill('Use detail four on drawing revision A.'); await save();
+  await page.getByRole('button', { name: 'Issue RFI response', exact: true }).click(); await save();
+  await page.getByRole('button', { name: /^Drawing revisions/ }).click();
+  await page.getByRole('button', { name: 'Create drawing revisions', exact: true }).click();
+  await dialog.getByLabel('Record title', { exact: true }).fill('Structural slab plan · B');
+  await dialog.getByRole('combobox', { name: 'Contract', exact: true }).selectOption('contract-1');
+  await dialog.getByLabel('Document number', { exact: true }).fill('STR-201');
+  await dialog.getByLabel('Revision', { exact: true }).fill('B');
+  await dialog.getByLabel('Content checksum', { exact: true }).fill('sha256:59ad'); await save();
+  await page.getByRole('button', { name: /^Structural slab plan · B/ }).click();
+  await page.getByRole('button', { name: 'Issue construction drawing', exact: true }).click(); await save();
+  await page.getByRole('button', { name: /^Requests for information/ }).click();
+  await page.getByRole('button', { name: /^RFI · Structural slab plan/ }).click();
+  await page.getByRole('button', { name: 'Supersede issued RFI response', exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'Current drawing revision', exact: true }).selectOption({ label: 'Structural slab plan · B' });
+  await dialog.getByLabel('Supersession reason', { exact: true }).fill('Drawing B changes the structural connection.'); await save();
+  await expect(page.locator('.detail-title')).toContainText('superseded');
+  await page.reload(); await page.getByRole('button', { name: /^Requests for information/ }).click();
+  await expect(page.locator('.list .row')).toHaveCount(2);
+  await page.getByRole('button', { name: /^RFI revision/ }).click();
+  await expect(page.locator('.detail')).toContainText('Structural slab plan · B');
+  await expect(page.locator('.detail')).toContainText('Previous RFI response');
+});
+
 
 test('handoff rejects stale evidence, renews, closes and revokes durably', async ({ page }) => {
   await page.goto('/operations');

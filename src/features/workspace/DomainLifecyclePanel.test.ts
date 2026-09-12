@@ -51,6 +51,28 @@ describe('durable RFI execution', () => {
         const repository = new Repository(product, { getItem: () => JSON.stringify(state), setItem: () => { throw new Error('Unexpected write'); } });
         expect(() => repository.commit({ id: 'stale', actorId: 'actor-1', entityId: 'open-r-1', operation: 'rfi-approve', type: 'operate', input: { response: 'Use the revised structural connection.' }, expectedRevision: 0 }, at)).toThrow('workspace changed');
     });
+    it('supersedes an issued response into one successor tied to the newer drawing', () => {
+        let state = submittedRfi();
+        state = action(state, 'approve-r', 'actor-1', 'open-r-1', 'rfi-approve', { response: 'Use detail four on the issued slab plan.' });
+        state = action(state, 'issue-r', 'actor-1', 'open-r-1', 'rfi-issue');
+        state.entities.push({ id: 'drawing-2', kind: 'drawing', title: 'Structural slab plan · B', status: 'draft', revision: 1,
+            fields: { contract: 'contract-1', document: 'STR-201', revision: 'B', checksum: 'sha256:59ad' } });
+        state = action(state, 'issue-b', 'actor-1', 'drawing-2', 'issue');
+        state = action(state, 'supersede-r', 'actor-1', 'open-r-1', 'rfi-supersede', { drawing: 'drawing-2', reason: 'Drawing B changes the structural connection.' });
+        expect(state.entities.find(item => item.id === 'open-r-1')?.status).toBe('superseded');
+        expect(state.entities.find(item => item.id === 'supersede-r-1')).toMatchObject({ status: 'draft', fields: { drawing: 'drawing-2', predecessor: 'open-r-1', owner: 'actor-2' } });
+        expect(() => action(state, 'duplicate', 'actor-1', 'open-r-1', 'rfi-supersede', { drawing: 'drawing-2', reason: 'A duplicate successor should be rejected.' })).toThrow('no longer available');
+    });
+    it('rejects a successor against an unrelated or unissued drawing', () => {
+        let state = submittedRfi();
+        state = action(state, 'approve-r', 'actor-1', 'open-r-1', 'rfi-approve', { response: 'Use detail four on the issued slab plan.' });
+        state = action(state, 'issue-r', 'actor-1', 'open-r-1', 'rfi-issue');
+        state.entities.push({ id: 'drawing-2', kind: 'drawing', title: 'Electrical plan · A', status: 'draft', revision: 1,
+            fields: { contract: 'contract-1', document: 'ELE-101', revision: 'A', checksum: 'sha256:7000' } });
+        const before = structuredClone(state);
+        expect(() => action(state, 'wrong-drawing', 'actor-1', 'open-r-1', 'rfi-supersede', { drawing: 'drawing-2', reason: 'Electrical update is unrelated.' })).toThrow('newer issued revision');
+        expect(state).toEqual(before);
+    });
 });
 const entity = (id: string, kind: string, status: string, fields: Entity['fields'] = {}): Entity => ({ id, kind, status, fields, title: id, revision: 1 });
 describe('rfiAnswerGate', () => {
