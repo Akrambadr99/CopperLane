@@ -56,3 +56,9 @@ Expanded strong count: **26**.
 ## Strongest 15 candidates
 
 Directions **1, 3, 4, 5, 7, 9, 10, 11, 12, 13, 15, 16, 31, 33, and 35** are the final shortlist. Their React judgment is respectively: keyed comparison state; filtered identity preservation; partial-result planning; asynchronous result ownership; optimistic rollback; live permission invalidation; time-bound delegation; conflict-safe draft recovery; refreshed derived totals; parsed query plus retained selection; cross-tab local/remote reconciliation; row-owned validation; cross-entity handoff derivation; readiness revocation from late evidence; and coordinated handoff/contingency state. Each has stable fixtures and a browser-observable outcome.
+
+## RFI lifecycle directions 41–50
+
+41. **Strong candidate · Medium-Hard:** RFI issue readiness combines drawing status, response specificity, and field evidence. 42. **Strong candidate · Medium:** changing the referenced drawing recomputes evidence ownership. 43. **Strong candidate · Medium-Hard:** field-impact toggle adds or removes the inspection gate without losing the response. 44. **Strong candidate · Medium-Hard:** superseding a drawing revokes a staged RFI response. 45. **Strong candidate · Medium:** unrelated passed inspections cannot satisfy the response. 46. **Strong candidate · Medium:** response draft survives impact-mode changes. 47. **Strong candidate · Medium:** empty and short responses expose deterministic reasons. 48. **Strong candidate · Medium-Hard:** refreshed inspection results update readiness without changing the chosen drawing. 49. **Too Easy:** rename the RFI heading. 50. **Too Hard:** coordinate RFIs with a live BIM platform.
+
+Current strong count: **34**. Revised strongest 15: **1, 3, 4, 5, 7, 9, 10, 11, 12, 15, 31, 33, 35, 41, and 43**.
