@@ -226,3 +226,13 @@ test('verified commercial evidence controls payment review certification and dis
  await actor.selectOption('actor-1');await page.getByRole('button',{name:'Certify payment'}).click();await save();await actor.selectOption('actor-0');await page.getByRole('button',{name:'Disburse certified payment'}).click();await dialog.getByLabel('Disbursement reference').fill('Bank instruction BL-2026-08-001 was confirmed for release.');await save();await page.reload();
  await page.getByRole('button',{name:/^Payment applications/}).click();await expect(page.locator('.detail-title')).toContainText('paid');await expect(page.locator('.detail')).toContainText('Certified payment disbursed with verified evidence retained');
 });
+
+test('field coordination resolution requires owner proposal architectural review and executive closure',async({page})=>{
+ await page.goto('/operations');const actor=page.getByRole('combobox',{name:'Current actor'}),dialog=page.getByRole('dialog');const save=async()=>{await dialog.getByRole('button',{name:'Save command',exact:true}).click();await expect(dialog).toHaveCount(0)};
+ await actor.selectOption('actor-1');await page.getByRole('button',{name:/^Drawing revisions/}).click();await page.getByRole('button',{name:'Issue construction drawing'}).click();await save();
+ await actor.selectOption('actor-2');await page.getByRole('button',{name:'Open field coordination issue'}).click();await dialog.getByLabel('Coordination zone').fill('North plant room service corridor');await dialog.getByLabel('Coordination issue').fill('Electrical tray conflicts with the released pipe elevation.');await save();
+ await page.getByRole('button',{name:/^Field coordination issues/}).click();await page.getByRole('button',{name:'Submit coordination resolution'}).click();await dialog.getByLabel('Resolution proposal').fill('Raise the tray and preserve the required pipe maintenance clearance.');await save();
+ await actor.selectOption('actor-1');await page.getByRole('button',{name:'Review coordination resolution'}).click();await dialog.getByLabel('Coordination decision').selectOption('approved');await dialog.getByLabel('Decision evidence').fill('Revised elevation preserves access and structural clearances.');await save();
+ await actor.selectOption('actor-0');await page.getByRole('button',{name:'Close coordination issue'}).click();await save();await page.reload();await page.getByRole('button',{name:/^Field coordination issues/}).click();
+ await expect(page.locator('.detail-title')).toContainText('closed');await expect(page.locator('.detail')).toContainText('Approved coordination issue closed with its history preserved.');
+});

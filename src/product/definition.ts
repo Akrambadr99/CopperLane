@@ -2,6 +2,7 @@ import { submittalKind, submittalOperations } from '../document-control/submitta
 import { closeoutKinds, closeoutOperations, requireConstructionCloseoutReady, validateConstructionCloseout } from '../project-controls/closeout-workflows';
 import { packageKinds, packageOperations, requirePackagesReadyForHandoff, validatePackages } from '../construction-packages/package-workflow';
 import { paymentEvidenceKind, paymentEvidenceOperations, requireVerifiedPaymentEvidence, validatePaymentEvidence } from '../commercial-controls/payment-evidence';
+import { coordinationKinds, coordinationOperations, validateFieldCoordination } from '../field-coordination/workflow';
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import type { Product, Kind, Field, Operation, Entity } from '../workspace/types';
 import { entity, find, rows, total, text, number, requireThat, money } from '../workspace/values';
@@ -181,10 +182,13 @@ kinds.push(...packageKinds);
 operations.push(...packageOperations);
 kinds.push(paymentEvidenceKind);
 operations.push(...paymentEvidenceOperations);
+kinds.push(...coordinationKinds);
+operations.push(...coordinationOperations);
 const validate: Product['validate'] = entities => {
     validateConstructionCloseout(entities);
     validatePackages(entities);
     validatePaymentEvidence(entities);
+    validateFieldCoordination(entities);
     for (const handoff of rows(entities, 'handoff').filter(item => item.status === 'approved')) {
         const contract = find(entities, text(handoff.fields, 'contract'), 'contract');
         requireThat(contract.status === 'closed', 'Approved handoff requires a closed contract.');
