@@ -46,3 +46,9 @@ Initial state comes from versioned seed records. Actions and transitions remain 
 30. **Too Hard:** orchestrate external contractor, bank, and owner services.
 
 Strong count: **18** Medium/Medium-Hard directions. They are strong because each has stable fixtures, one visible outcome, real construction rules, and an expected patch of a few existing files.
+
+## Depth expansion directions 31–40
+
+31. **Strong candidate · Medium-Hard:** construction handoff combines issued drawings, inspection status, and executed changes. 32. **Strong candidate · Medium:** contract switch recomputes linked evidence without leaking prior blockers. 33. **Strong candidate · Medium-Hard:** late failed inspection revokes a previously ready handoff. 34. **Strong candidate · Medium:** superseded drawings remain visible evidence without satisfying issue gates. 35. **Strong candidate · Medium-Hard:** approved change execution updates handoff and contingency together. 36. **Strong candidate · Medium:** handoff evidence count remains stable across filtering. 37. **Strong candidate · Medium-Hard:** permission change during handoff approval preserves review state. 38. **Strong candidate · Medium:** empty contract handoff explains missing issued evidence. 39. **Too Easy:** change the handoff heading. 40. **Too Hard:** coordinate handoff with external BIM and payment platforms.
+
+Expanded strong count: **26**.
