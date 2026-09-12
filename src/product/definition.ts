@@ -1,3 +1,4 @@
+import { submittalKind, submittalOperations } from '../document-control/submittal-workflow';
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import type { Product, Kind, Field, Operation, Entity } from '../workspace/types';
 import { entity, find, rows, total, text, number, requireThat, money } from '../workspace/values';
@@ -108,13 +109,14 @@ operations.push(
 function handoffEvidence(entities: Entity[], contractId: string) {
     const drawings = linked(entities, 'drawing', 'contract', contractId);
     const ids = new Set(drawings.map(item => item.id));
-    return entities.filter(item => item.id === contractId || (['drawing', 'change'].includes(item.kind) && item.fields['contract'] === contractId) || (['inspection', 'rfi'].includes(item.kind) && ids.has(String(item.fields['drawing']))));
+    return entities.filter(item => item.id === contractId || (['drawing', 'change'].includes(item.kind) && item.fields['contract'] === contractId) || (['inspection', 'rfi', 'submittal'].includes(item.kind) && ids.has(String(item.fields['drawing']))));
 }
 function handoffFingerprint(entities: Entity[], contractId: string) {
     return JSON.stringify(handoffEvidence(entities, contractId).map(item => [item.id, item.revision, item.status]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 function requireHandoffReady(entities: Entity[], contractId: string) {
     const evidence = handoffEvidence(entities, contractId);
+    requireThat(!evidence.some(item => item.kind === 'submittal' && !['released', 'withdrawn'].includes(item.status)), 'Release or withdraw outstanding submittals before handoff.');
     const issued = evidence.filter(item => item.kind === 'drawing' && item.status === 'issued');
     requireThat(issued.length > 0, 'Issue construction drawings before requesting handoff.');
     requireThat(issued.every(drawing => evidence.some(item => item.kind === 'inspection' && item.fields['drawing'] === drawing.id && item.status === 'passed')), 'Every issued drawing requires a passed field inspection.');
@@ -156,6 +158,8 @@ operations.push(
         return 'Handoff revoked and contract reopened; original approval and evidence retained.';
     }},
 );
+kinds.push(submittalKind);
+operations.push(...submittalOperations);
 const validate: Product['validate'] = entities => {
     for (const handoff of rows(entities, 'handoff').filter(item => item.status === 'approved')) {
         const contract = find(entities, text(handoff.fields, 'contract'), 'contract');
