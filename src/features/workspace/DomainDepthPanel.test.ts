@@ -51,3 +51,12 @@ describe('contract handoff execution', () => {
         expect(approved).toEqual(before);
     });
 });
+
+it('approves a handoff with a complete evidence fingerprint beyond ordinary note limits', () => {
+    const state = ready();
+    for (let index = 0; index < 160; index += 1) state.entities.push(row('executed-change-record-' + String(index), 'change', 'executed', {contract:'contract-1',cost:0,days:0,scope:'Completed coordination change.'}));
+    const requested = request(state);
+    const record = requested.entities.find(item => item.id === handoff(requested));
+    expect(String(record?.fields['evidence']).length).toBeGreaterThan(4000);
+    expect(run(requested, 'handoff-approve', handoff(requested), 'actor-0').entities.find(item => item.id === 'contract-1')?.status).toBe('closed');
+});

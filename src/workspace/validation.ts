@@ -16,7 +16,7 @@ export function validateFields(fields: Record<string, Value>, definitions: Field
             requireThat(field.max === undefined || value <= field.max, field.label + ' exceeds its maximum.');
         }
         else {
-            requireThat(typeof value === 'string' && value.length <= 4000, field.label + ' must be valid text.');
+            requireThat(typeof value === 'string' && value.length <= (field.max ?? 4000), field.label + ' must be valid text.');
             if (field.required)
                 requireThat(value.trim().length > 0, field.label + ' is required.');
             if (field.type === 'date')
