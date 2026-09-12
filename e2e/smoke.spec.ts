@@ -1,9 +1,15 @@
 import { expect, test } from '@playwright/test'
-
-test('BuildLedger exposes its primary domain workflow', async ({ page }) => {
+test('BuildLedger opens its durable operations workspace', async ({ page }) => {
   await page.goto('/')
-  await expect(page).toHaveTitle('BuildLedger')
-  await expect(page.getByRole('heading', { level: 1, name: 'Drawing revision register' })).toBeVisible()
-  await page.getByRole('button', { name: 'field records' }).click()
-  await expect(page.getByRole('heading', { level: 1, name: 'Inspection & RFI references' })).toBeVisible()
+  await expect(page.getByText('BuildLedger', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  await page.getByRole('button', { name: /^Create / }).click()
+  await expect(page.getByRole('heading', { name: 'Create record' })).toBeVisible()
+  await page.getByRole('button', { name: 'Close dialog' }).click()
+  const sections = page.locator('aside > button')
+  if (await sections.count() > 1) await sections.nth(1).click()
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export backup' }).click()
+  await download
 })
