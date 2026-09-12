@@ -1,4 +1,5 @@
 import { submittalKind, submittalOperations } from '../document-control/submittal-workflow';
+import { closeoutKinds, closeoutOperations, requireConstructionCloseoutReady, validateConstructionCloseout } from '../project-controls/closeout-workflows';
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import type { Product, Kind, Field, Operation, Entity } from '../workspace/types';
 import { entity, find, rows, total, text, number, requireThat, money } from '../workspace/values';
@@ -115,6 +116,7 @@ function handoffFingerprint(entities: Entity[], contractId: string) {
     return JSON.stringify(handoffEvidence(entities, contractId).map(item => [item.id, item.revision, item.status]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
 }
 function requireHandoffReady(entities: Entity[], contractId: string) {
+    requireConstructionCloseoutReady(entities, contractId);
     const evidence = handoffEvidence(entities, contractId);
     requireThat(!evidence.some(item => item.kind === 'submittal' && !['released', 'withdrawn'].includes(item.status)), 'Release or withdraw outstanding submittals before handoff.');
     const issued = evidence.filter(item => item.kind === 'drawing' && item.status === 'issued');
@@ -160,7 +162,10 @@ operations.push(
 );
 kinds.push(submittalKind);
 operations.push(...submittalOperations);
+kinds.push(...closeoutKinds);
+operations.push(...closeoutOperations);
 const validate: Product['validate'] = entities => {
+    validateConstructionCloseout(entities);
     for (const handoff of rows(entities, 'handoff').filter(item => item.status === 'approved')) {
         const contract = find(entities, text(handoff.fields, 'contract'), 'contract');
         requireThat(contract.status === 'closed', 'Approved handoff requires a closed contract.');

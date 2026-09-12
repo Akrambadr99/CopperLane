@@ -170,3 +170,28 @@ test('submittal rejection, revised evidence and executive release survive reload
   await expect(page.locator('.detail-title')).toContainText('released');
   await expect(page.getByText('Submittal rejected for revision:', { exact: false }).last()).toBeVisible();
 });
+
+test('punch correction requires independent verification and survives reload', async ({ page }) => {
+  await page.goto('/operations');
+  const actor = page.getByRole('combobox', { name: 'Current actor' });
+  const dialog = page.getByRole('dialog');
+  const save = async () => { await dialog.getByRole('button', { name: 'Save command', exact: true }).click(); await expect(dialog).toHaveCount(0); };
+  await actor.selectOption('actor-1');
+  await page.getByRole('button', { name: /^Drawing revisions/ }).click();
+  await page.getByRole('button', { name: 'Issue construction drawing', exact: true }).click(); await save();
+  await actor.selectOption('actor-2');
+  await page.getByRole('button', { name: 'Open punch list item', exact: true }).click();
+  await dialog.getByLabel('Defect description', { exact: true }).fill('Anchor bolts do not match the issued slab detail.');
+  await dialog.getByLabel('Correction due', { exact: true }).fill('2026-09-20'); await save();
+  await page.getByRole('button', { name: /^Punch list items/ }).click();
+  await actor.selectOption('actor-3');
+  await page.getByRole('button', { name: 'Submit punch correction', exact: true }).click();
+  await dialog.getByLabel('Resolution evidence', { exact: true }).fill('Contractor replaced the bolts and uploaded a signed torque report.'); await save();
+  await actor.selectOption('actor-2');
+  await page.getByRole('button', { name: 'Verify punch correction', exact: true }).click();
+  await dialog.getByLabel('Verification note', { exact: true }).fill('Site inspection confirms the correction matches the issued detail.'); await save();
+  await page.reload();
+  await page.getByRole('button', { name: /^Punch list items/ }).click();
+  await expect(page.locator('.detail-title')).toContainText('verified');
+  await expect(page.locator('.detail')).toContainText('signed torque report');
+});
