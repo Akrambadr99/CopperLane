@@ -5,4 +5,5 @@ const children: RouteObject[] = [{ index: true, lazy: async () => ({ Component: 
 children.splice(2,0,{path:'schedule-claims',lazy:async()=>({Component:(await import('../schedule-claims/ScheduleClaimsPage')).ScheduleClaimsPage})});
 children.splice(3,0,{path:'change-impact',lazy:async()=>({Component:(await import('../change-impact/ChangeImpactPage')).ChangeImpactPage})});
 children.splice(4,0,{path:'payment-release',lazy:async()=>({Component:(await import('../payment-release/PaymentReleasePage')).PaymentReleasePage})});
+children.splice(5,0,{path:'subcontract-procurement',lazy:async()=>({Component:(await import('../subcontract-procurement/SubcontractProcurementPage')).SubcontractProcurementPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
