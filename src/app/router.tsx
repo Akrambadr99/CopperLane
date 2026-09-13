@@ -13,4 +13,5 @@ children.splice(9,0,{path:'safety-incident',lazy:async()=>({Component:(await imp
 children.splice(10,0,{path:'material-traceability',lazy:async()=>({Component:(await import('../material-traceability/MaterialTraceabilityPage')).MaterialTraceabilityPage})});
 children.splice(11,0,{path:'subcontract-variations',lazy:async()=>({Component:(await import('../subcontract-variations/SubcontractVariationsPage')).SubcontractVariationsPage})});
 children.splice(12,0,{path:'rfi-coordination',lazy:async()=>({Component:(await import('../rfi-coordination/RfiCoordinationPage')).RfiCoordinationPage})});
+children.splice(13,0,{path:'inspection-release',lazy:async()=>({Component:(await import('../inspection-release/InspectionReleasePage')).InspectionReleasePage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
