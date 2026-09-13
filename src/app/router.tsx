@@ -7,4 +7,5 @@ children.splice(3,0,{path:'change-impact',lazy:async()=>({Component:(await impor
 children.splice(4,0,{path:'payment-release',lazy:async()=>({Component:(await import('../payment-release/PaymentReleasePage')).PaymentReleasePage})});
 children.splice(5,0,{path:'subcontract-procurement',lazy:async()=>({Component:(await import('../subcontract-procurement/SubcontractProcurementPage')).SubcontractProcurementPage})});
 children.splice(6,0,{path:'cost-forecast',lazy:async()=>({Component:(await import('../cost-forecast/CostForecastPage')).CostForecastPage})});
+children.splice(7,0,{path:'permit-to-pour',lazy:async()=>({Component:(await import('../permit-to-pour/PermitToPourPage')).PermitToPourPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
