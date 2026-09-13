@@ -10,4 +10,5 @@ children.splice(6,0,{path:'cost-forecast',lazy:async()=>({Component:(await impor
 children.splice(7,0,{path:'permit-to-pour',lazy:async()=>({Component:(await import('../permit-to-pour/PermitToPourPage')).PermitToPourPage})});
 children.splice(8,0,{path:'practical-completion',lazy:async()=>({Component:(await import('../practical-completion/PracticalCompletionPage')).PracticalCompletionPage})});
 children.splice(9,0,{path:'safety-incident',lazy:async()=>({Component:(await import('../safety-incident/SafetyIncidentPage')).SafetyIncidentPage})});
+children.splice(10,0,{path:'material-traceability',lazy:async()=>({Component:(await import('../material-traceability/MaterialTraceabilityPage')).MaterialTraceabilityPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
