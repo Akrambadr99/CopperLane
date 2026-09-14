@@ -14,4 +14,5 @@ children.splice(10,0,{path:'material-traceability',lazy:async()=>({Component:(aw
 children.splice(11,0,{path:'subcontract-variations',lazy:async()=>({Component:(await import('../subcontract-variations/SubcontractVariationsPage')).SubcontractVariationsPage})});
 children.splice(12,0,{path:'rfi-coordination',lazy:async()=>({Component:(await import('../rfi-coordination/RfiCoordinationPage')).RfiCoordinationPage})});
 children.splice(13,0,{path:'inspection-release',lazy:async()=>({Component:(await import('../inspection-release/InspectionReleasePage')).InspectionReleasePage})});
+children.splice(14,0,{path:'nonconformance-control',lazy:async()=>({Component:(await import('../nonconformance-control/NonconformanceControlPage')).NonconformanceControlPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
