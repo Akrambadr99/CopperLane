@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { authorizeProjectClosure, initialCloseoutPortfolioState, scheduleCloseoutIntervention } from './CloseoutPortfolioControl'
+import { authorizeProjectClosure, closeoutPermissions, initialCloseoutPortfolioState, queryProjectCloseoutHistory, scheduleCloseoutIntervention } from './closeout-control-domain'
 
 const command = { id: 'intervention-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }
 
@@ -39,5 +39,12 @@ describe('evidence-based project closure', () => {
     expect(() => authorizeProjectClosure(active, { ...closure, authority: 'Portfolio Viewer' })).toThrow('commercial director')
     const closed = authorizeProjectClosure(active, closure)
     expect(authorizeProjectClosure(closed, closure)).toBe(closed)
+  })
+  it('centralizes closeout capability and returns chronological evidence lineage', () => {
+    expect(closeoutPermissions('Portfolio Viewer')).toEqual({ canIntervene: false, canAuthorizeClosure: false })
+    const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+    const closed = authorizeProjectClosure(active, closure)
+    expect(queryProjectCloseoutHistory(closed, 'PROJECT-SOUTH').map((item) => [item.kind, item.actor])).toEqual([['intervention', 'director-closeout'], ['closure', 'director-closeout']])
+    expect(queryProjectCloseoutHistory(closed, 'PROJECT-SOUTH')[1]?.evidence).toContain('FA-FINAL')
   })
 })
