@@ -265,3 +265,6 @@ test('released variation rebases an open payment application',async({page})=>{aw
 
 
 test('shows prioritized multi-project closeout exposure',async({page})=>{await page.goto('/practical-completion');const portfolio=page.getByRole('region',{name:'Closeout portfolio'});await expect(portfolio).toContainText('PROJECT-SOUTH · breached');await expect(portfolio).toContainText('exposure 280000');});
+
+
+test('commercial director schedules and persists an overdue closeout intervention',async({page})=>{await page.goto('/practical-completion');await page.getByLabel('Portfolio authority').selectOption('Commercial Director');await page.getByRole('button',{name:'Schedule overdue closeout intervention'}).click();await expect(page.getByRole('status')).toContainText('responsibility transferred');await expect(page.getByRole('list',{name:'Closeout intervention history'})).toContainText('commercial-south to director-closeout');await page.reload();await expect(page.getByRole('list',{name:'Closeout intervention history'})).toContainText('review 2026-10-22');});
