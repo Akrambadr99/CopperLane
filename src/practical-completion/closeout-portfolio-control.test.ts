@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { initialCloseoutPortfolioState, scheduleCloseoutIntervention } from './CloseoutPortfolioControl'
+import { authorizeProjectClosure, initialCloseoutPortfolioState, scheduleCloseoutIntervention } from './CloseoutPortfolioControl'
 
 const command = { id: 'intervention-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }
 
@@ -17,5 +17,27 @@ describe('closeout portfolio intervention', () => {
   it('treats a repeated intervention command as idempotent', () => {
     const next = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
     expect(scheduleCloseoutIntervention(next, command)).toBe(next)
+  })
+})
+
+describe('evidence-based project closure', () => {
+  const closure = { id: 'closure-1', expectedRevision: 1, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', evidenceIds: ['DOC-1', 'DOC-2'], satisfiedDocuments: 2, waivedDocuments: 1, waiverAuthority: 'Commercial Director', waiverRationale: 'Minor training record accepted with retained commercial exposure.', waivedExposureCents: 40_000, finalAccountReference: 'FA-FINAL', custodyReference: 'CUSTODY-1', authorizedBy: 'director-closeout', closedOn: '2026-10-24' }
+  it('reconciles every obligation and preserves waiver evidence', () => {
+    const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+    const closed = authorizeProjectClosure(active, closure)
+    expect(closed.projects.find((item) => item.projectId === 'PROJECT-SOUTH')).toMatchObject({ openDocuments: 0, commercialExposureCents: 40_000 })
+    expect(closed.closures[0]).toMatchObject({ interventionId: 'intervention-1', waivedDocuments: 1, immutable: true })
+  })
+  it('blocks incomplete reconciliation and stale approval atomically', () => {
+    const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+    expect(() => authorizeProjectClosure(active, { ...closure, satisfiedDocuments: 1 })).toThrow('Every open document')
+    expect(() => authorizeProjectClosure(active, { ...closure, expectedRevision: 0 })).toThrow('changed')
+    expect(active.projects.find((item) => item.projectId === 'PROJECT-SOUTH')?.openDocuments).toBe(3)
+  })
+  it('requires director approval and makes duplicate closure idempotent', () => {
+    const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+    expect(() => authorizeProjectClosure(active, { ...closure, authority: 'Portfolio Viewer' })).toThrow('commercial director')
+    const closed = authorizeProjectClosure(active, closure)
+    expect(authorizeProjectClosure(closed, closure)).toBe(closed)
   })
 })

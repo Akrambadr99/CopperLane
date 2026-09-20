@@ -13,10 +13,12 @@ export interface CloseoutIntervention {
   reason: string
   immutable: true
 }
+export interface ProjectClosure { id: string; projectId: string; interventionId: string; evidenceIds: string[]; satisfiedDocuments: number; waivedDocuments: number; waiverAuthority: string | null; waiverRationale: string | null; waivedExposureCents: number; finalAccountReference: string; custodyReference: string; authorizedBy: string; closedOn: string; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
   projects: ProjectCloseoutRecord[]
   interventions: CloseoutIntervention[]
+  closures: ProjectClosure[]
 }
 export interface ScheduleCloseoutIntervention {
   id: string
@@ -33,6 +35,7 @@ export const initialCloseoutPortfolioState: CloseoutPortfolioState = {
   revision: 0,
   projects: structuredClone(seededCloseoutPortfolio),
   interventions: [],
+  closures: [],
 }
 
 export function scheduleCloseoutIntervention(state: CloseoutPortfolioState, command: ScheduleCloseoutIntervention) {
@@ -63,17 +66,38 @@ export function scheduleCloseoutIntervention(state: CloseoutPortfolioState, comm
   return next
 }
 
+interface AuthorizeProjectClosure { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; evidenceIds: string[]; satisfiedDocuments: number; waivedDocuments: number; waiverAuthority: string | null; waiverRationale: string | null; waivedExposureCents: number; finalAccountReference: string; custodyReference: string; authorizedBy: string; closedOn: string }
+export function authorizeProjectClosure(state: CloseoutPortfolioState, command: AuthorizeProjectClosure) {
+  if (state.closures.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) throw new Error('Closeout portfolio changed. Refresh before closure.')
+  if (command.authority !== 'Commercial Director') throw new Error('Only the commercial director can authorize project closure.')
+  const project = state.projects.find((item) => item.projectId === command.projectId)
+  const intervention = [...state.interventions].reverse().find((item) => item.projectId === command.projectId)
+  if (!project || !intervention) throw new Error('A governed closeout intervention is required before closure.')
+  if (command.satisfiedDocuments + command.waivedDocuments !== project.openDocuments) throw new Error('Every open document must be satisfied or explicitly waived.')
+  if (command.evidenceIds.length < command.satisfiedDocuments || !command.finalAccountReference || !command.custodyReference) throw new Error('Completion, final-account, and custody evidence are required.')
+  if (command.waivedDocuments > 0 && (!command.waiverAuthority || (command.waiverRationale?.trim().length ?? 0) < 20 || command.waivedExposureCents <= 0)) throw new Error('A waiver requires authority, rationale, and commercial consequence.')
+  const next = structuredClone(state)
+  const target = next.projects.find((item) => item.projectId === project.projectId)
+  if (!target) throw new Error('Project disappeared during closure.')
+  next.closures.push({ ...command, interventionId: intervention.id, evidenceIds: [...command.evidenceIds], waiverRationale: command.waiverRationale?.trim() ?? null, immutable: true })
+  target.openDocuments = 0
+  target.commercialExposureCents = command.waivedExposureCents
+  next.revision += 1
+  return next
+}
+
 export class CloseoutPortfolioRepository {
-  static key = 'buildledger:closeout-portfolio:v1'
+  static key = 'buildledger:closeout-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
   read(): CloseoutPortfolioState {
     const raw = this.storage.getItem(CloseoutPortfolioRepository.key)
     return raw ? JSON.parse(raw) as CloseoutPortfolioState : structuredClone(initialCloseoutPortfolioState)
   }
-  dispatch(command: ScheduleCloseoutIntervention) {
+  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure) {
     const current = this.read()
-    const next = scheduleCloseoutIntervention(current, command)
+    const next = 'evidenceIds' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
     if (next !== current) this.storage.setItem(CloseoutPortfolioRepository.key, JSON.stringify(next))
     return next
   }
@@ -95,5 +119,6 @@ export function CloseoutPortfolioControl() {
     }
     queueMicrotask(() => feedback.current?.focus())
   }
-  return <section className="card" aria-label="Closeout portfolio"><h2>Project closeout portfolio</h2><label>Portfolio authority<select value={authority} onChange={(event) => { setAuthority(event.target.value as PortfolioAuthority) }}><option>Portfolio Viewer</option><option>Commercial Director</option></select></label>{portfolio.map((item) => <p key={item.projectId}>{item.projectId} · {item.urgency} · coverage {item.coveragePercent}% · exposure {item.commercialExposureCents} · manager {item.commercialManager} · source {item.sourceReference}</p>)}<button disabled={authority !== 'Commercial Director' || state.interventions.length > 0} onClick={intervene}>Schedule overdue closeout intervention</button>{message && <p ref={feedback} tabIndex={-1} role="status">{message}</p>}<ol aria-label="Closeout intervention history">{state.interventions.map((item) => <li key={item.id}>{item.projectId} · {item.previousManager} to {item.assignedManager} · review {item.reviewOn} · source {item.obligationReference}</li>)}</ol></section>
+  const close = () => { try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, projectId: 'PROJECT-SOUTH', evidenceIds: ['DOC-O&M-9', 'DOC-WARRANTY-3'], satisfiedDocuments: 2, waivedDocuments: 1, waiverAuthority: 'Commercial Director', waiverRationale: 'Minor training record accepted with retained commercial exposure.', waivedExposureCents: 40_000, finalAccountReference: 'FA-2026-009-FINAL', custodyReference: 'CUSTODY-882', authorizedBy: 'director-closeout', closedOn: '2026-10-24' })); setMessage('Project closeout authorized with immutable evidence and waiver consequence.') } catch (error) { setMessage(error instanceof Error ? error.message : 'Project closure failed.') } queueMicrotask(() => feedback.current?.focus()) }
+  return <section className="card" aria-label="Closeout portfolio"><h2>Project closeout portfolio</h2><label>Portfolio authority<select value={authority} onChange={(event) => { setAuthority(event.target.value as PortfolioAuthority) }}><option>Portfolio Viewer</option><option>Commercial Director</option></select></label>{portfolio.map((item) => <p key={item.projectId}>{item.projectId} · {item.urgency} · coverage {item.coveragePercent}% · exposure {item.commercialExposureCents} · manager {item.commercialManager} · source {item.sourceReference}</p>)}<button disabled={authority !== 'Commercial Director' || state.interventions.length > 0} onClick={intervene}>Schedule overdue closeout intervention</button><button disabled={authority !== 'Commercial Director' || state.interventions.length === 0 || state.closures.length > 0} onClick={close}>Authorize evidence-based project closure</button>{message && <p ref={feedback} tabIndex={-1} role="status">{message}</p>}<ol aria-label="Closeout intervention history">{state.interventions.map((item) => <li key={item.id}>{item.projectId} · {item.previousManager} to {item.assignedManager} · review {item.reviewOn} · source {item.obligationReference}</li>)}</ol><ol aria-label="Project closure history">{state.closures.map((item) => <li key={item.id}>{item.projectId} · closed {item.closedOn} · evidence {item.evidenceIds.join(', ')} · waived {item.waivedDocuments} · retained exposure {item.waivedExposureCents}</li>)}</ol></section>
 }
