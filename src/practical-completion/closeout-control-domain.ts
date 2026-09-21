@@ -25,6 +25,10 @@ export interface CloseoutDocumentCustodyRecord { id: string; projectId: string; 
 export interface CloseoutWaiverRecord { id: string; projectId: string; closureId: string; waivedDocuments: number; authority: string; rationale: string; retainedExposureCents: number; recordedOn: string; immutable: true }
 export interface FinalAccountAdjustment { id: string; projectId: string; reason: string; category: 'variation' | 'retention' | 'claim'; valueCents: number; evidenceIds: string[]; submittedRevision: number; status: 'proposed' | 'accepted' | 'rejected' | 'superseded'; proposedBy: string; proposedOn: string; reviewedBy: string | null; reviewedOn: string | null; resultingAccountRevision: number | null; direction?: 'increase' | 'decrease'; contractor?: string; sourceCommercialItem?: string; notes?: string; proposedEffectiveRevision?: number; immutable: true }
 export interface CloseoutEvidencePackage { id: string; projectId: string; status: 'preliminary' | 'final'; sourceRevision: number; accountId: string | null; accountRevision: number; acceptedAdjustmentIds: string[]; closureId: string | null; custodyIds: string[]; waiverIds: string[]; openDocumentCount: number; assembledBy: string; assembledOn: string; immutable: true }
+export type CloseoutRecipient = 'Client representative' | 'Commercial manager' | 'Main contractor'
+export const requiredCloseoutRecipients: CloseoutRecipient[] = ['Client representative', 'Commercial manager', 'Main contractor']
+export interface CloseoutHandoff { id: string; projectId: string; packageId: string; packageSourceRevision: number; recipient: CloseoutRecipient; preparedBy: string; preparedOn: string; immutable: true }
+export interface CloseoutRecipientResponse { id: string; handoffId: string; packageId: string; recipient: CloseoutRecipient; decision: 'acknowledged' | 'correction-requested'; receiptReference: string; rationale: string; recordedBy: string; recordedOn: string; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
   projects: ProjectCloseoutRecord[]
@@ -35,6 +39,8 @@ export interface CloseoutPortfolioState {
   waivers: CloseoutWaiverRecord[]
   adjustments: FinalAccountAdjustment[]
   evidencePackages: CloseoutEvidencePackage[]
+  handoffs: CloseoutHandoff[]
+  recipientResponses: CloseoutRecipientResponse[]
 }
 export interface ScheduleCloseoutIntervention {
   id: string
@@ -57,6 +63,46 @@ export const initialCloseoutPortfolioState: CloseoutPortfolioState = {
   waivers: [],
   adjustments: [],
   evidencePackages: [],
+  handoffs: [],
+  recipientResponses: [],
+}
+
+export function prepareCloseoutHandoff(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; packageId: string; recipient: CloseoutRecipient; preparedBy: string; preparedOn: string }) {
+  if (state.handoffs.some((item) => item.id === command.id)) return state
+  const pkg = state.evidencePackages.find((item) => item.id === command.packageId)
+  if (!pkg) throw new Error('A final closeout package is required for recipient handoff.')
+  if (pkg.status !== 'final') throw new Error('A final closeout package is required for recipient handoff.')
+  if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', pkg.projectId, 'Closeout changed. Refresh before preparing recipient handoff.')
+  if (!closeoutPermissions(command.authority).canAuthorizeClosure) throw new CloseoutControlError('UNAUTHORIZED', pkg.projectId, 'Only the commercial director can prepare closeout handoff.')
+  if (state.evidencePackages.filter((item) => item.projectId === pkg.projectId && item.status === 'final').at(-1)?.id !== pkg.id) throw new Error('A newer final package superseded this handoff source.')
+  if (!requiredCloseoutRecipients.includes(command.recipient) || !command.preparedBy.trim()) throw new Error('A required recipient and preparing operator are needed.')
+  if (state.handoffs.some((item) => item.packageId === pkg.id && item.recipient === command.recipient)) throw new Error('This recipient already has a handoff for the selected package.')
+  const next = structuredClone(state)
+  next.handoffs.push({ id: command.id, projectId: pkg.projectId, packageId: pkg.id, packageSourceRevision: pkg.sourceRevision, recipient: command.recipient, preparedBy: command.preparedBy.trim(), preparedOn: command.preparedOn, immutable: true })
+  next.revision += 1
+  return next
+}
+
+export function recordCloseoutRecipientResponse(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; handoffId: string; packageId: string; recipient: CloseoutRecipient; decision: CloseoutRecipientResponse['decision']; receiptReference: string; rationale: string; recordedBy: string; recordedOn: string }) {
+  if (state.recipientResponses.some((item) => item.id === command.id)) return state
+  const handoff = state.handoffs.find((item) => item.id === command.handoffId)
+  if (!handoff) throw new Error('A prepared closeout handoff is required before recording recipient response.')
+  if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', handoff.projectId, 'Closeout changed. Refresh before recording recipient response.')
+  if (!closeoutPermissions(command.authority).canAuthorizeClosure) throw new CloseoutControlError('UNAUTHORIZED', handoff.projectId, 'Only the commercial director can record verified recipient response evidence.')
+  if (handoff.packageId !== command.packageId || handoff.recipient !== command.recipient) throw new Error('Recipient response must reference the exact handoff, package, and recipient.')
+  if (state.evidencePackages.filter((item) => item.projectId === handoff.projectId && item.status === 'final').at(-1)?.id !== handoff.packageId) throw new Error('A newer final package requires a new recipient handoff.')
+  if (state.recipientResponses.some((item) => item.handoffId === handoff.id)) throw new Error('This handoff already has a recorded recipient response.')
+  if (!command.receiptReference.trim() || !command.recordedBy.trim() || (command.decision === 'correction-requested' && command.rationale.trim().length < 15)) throw new Error('Receipt evidence, operator, and correction rationale are required.')
+  const next = structuredClone(state)
+  next.recipientResponses.push({ id: command.id, handoffId: handoff.id, packageId: handoff.packageId, recipient: handoff.recipient, decision: command.decision, receiptReference: command.receiptReference.trim(), rationale: command.rationale.trim(), recordedBy: command.recordedBy.trim(), recordedOn: command.recordedOn, immutable: true })
+  next.revision += 1
+  return next
+}
+
+export function getCloseoutHandoffStatus(state: CloseoutPortfolioState, projectId: string) {
+  const pkg = state.evidencePackages.filter((item) => item.projectId === projectId && item.status === 'final').at(-1) ?? null
+  const recipients = requiredCloseoutRecipients.map((recipient) => { const handoff = state.handoffs.find((item) => item.packageId === pkg?.id && item.recipient === recipient) ?? null; const response = state.recipientResponses.find((item) => item.handoffId === handoff?.id) ?? null; return { recipient, handoff, response, status: !handoff ? 'not prepared' as const : !response ? 'awaiting manual receipt' as const : response.decision } })
+  return { package: pkg, recipients, complete: Boolean(pkg) && recipients.every((item) => item.status === 'acknowledged') }
 }
 
 interface AssembleCloseoutEvidence { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; status: 'preliminary' | 'final'; assembledBy: string; assembledOn: string }
@@ -225,16 +271,16 @@ export class BrowserCloseoutPersistence implements CloseoutPersistence {
   static key = 'buildledger:closeout-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [] } }
+  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [], handoffs: saved.handoffs ?? [], recipientResponses: saved.recipientResponses ?? [] } }
   save(next: CloseoutPortfolioState) { this.storage.setItem(BrowserCloseoutPersistence.key, JSON.stringify(next)) }
 }
 export class CloseoutPortfolioRepository {
   private readonly persistence: CloseoutPersistence
   constructor(persistence: CloseoutPersistence) { this.persistence = persistence }
   read(): CloseoutPortfolioState { return this.persistence.load() ?? structuredClone(initialCloseoutPortfolioState) }
-  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence) {
+  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence | Parameters<typeof prepareCloseoutHandoff>[1] | Parameters<typeof recordCloseoutRecipientResponse>[1]) {
     const current = this.read()
-    const next = 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
+    const next = 'receiptReference' in command ? recordCloseoutRecipientResponse(current, command) : 'packageId' in command ? prepareCloseoutHandoff(current, command) : 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
     if (next !== current) this.persistence.save(next)
     return next
   }

@@ -1,9 +1,32 @@
 import { describe, expect, it } from 'vitest'
-import { assembleCloseoutEvidencePackage, authorizeProjectClosure, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, compareFinalAccountAdjustment, getCloseoutDocumentHistory, getFinalAccountAdjustmentReadiness, getFinalAccountHistory, initialCloseoutPortfolioState, proposeCategorizedFinalAccountAdjustment, proposeFinalAccountAdjustment, queryProjectCloseoutHistory, reviewFinalAccountAdjustment, scheduleCloseoutIntervention, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
+import { assembleCloseoutEvidencePackage, authorizeProjectClosure, BrowserCloseoutPersistence, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, compareFinalAccountAdjustment, getCloseoutDocumentHistory, getCloseoutHandoffStatus, getFinalAccountAdjustmentReadiness, getFinalAccountHistory, initialCloseoutPortfolioState, prepareCloseoutHandoff, proposeCategorizedFinalAccountAdjustment, proposeFinalAccountAdjustment, queryProjectCloseoutHistory, recordCloseoutRecipientResponse, requiredCloseoutRecipients, reviewFinalAccountAdjustment, scheduleCloseoutIntervention, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
 
 it('pins preliminary closeout evidence and requires actual closure before a final package', () => { const command = { id: 'package-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', status: 'preliminary' as const, assembledBy: 'director', assembledOn: '2026-10-25' }; expect(() => assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, { ...command, status: 'final' })).toThrow('completed closure'); expect(() => assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, { ...command, authority: 'Portfolio Viewer' })).toThrow('commercial director'); const first = assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, command); expect(first.evidencePackages[0]).toMatchObject({ sourceRevision: 0, accountRevision: 0, openDocumentCount: 3, immutable: true }); const later = scheduleCloseoutIntervention(first, { id: 'intervention-2', expectedRevision: 1, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }); expect(later.evidencePackages[0]).toEqual(first.evidencePackages[0]); expect(() => assembleCloseoutEvidencePackage(later, { ...command, id: 'package-stale' })).toThrow('Refresh') })
 
 const command = { id: 'intervention-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }
+
+it('pins manual recipient responses to the final package and resets handover after correction', () => {
+  const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+  const closed = authorizeProjectClosure(active, { id: 'closure-handoff', expectedRevision: active.revision, authority: 'Commercial Director', projectId: command.projectId, evidenceIds: ['DOC-1', 'DOC-2'], satisfiedDocuments: 2, waivedDocuments: 1, waiverAuthority: 'Commercial Director', waiverRationale: 'Minor training record accepted with retained commercial exposure.', waivedExposureCents: 40_000, finalAccountReference: 'FA-FINAL', custodyReference: 'CUSTODY-1', authorizedBy: 'director-closeout', closedOn: '2026-10-24' })
+  let state = assembleCloseoutEvidencePackage(closed, { id: 'final-1', expectedRevision: closed.revision, authority: 'Commercial Director', projectId: command.projectId, status: 'final', assembledBy: 'director', assembledOn: '2026-10-25' })
+  for (const [index, recipient] of requiredCloseoutRecipients.entries()) {
+    const handoff = { id: `handoff-${String(index)}`, expectedRevision: state.revision, authority: 'Commercial Director' as const, packageId: 'final-1', recipient, preparedBy: 'director', preparedOn: '2026-10-26' }
+    expect(() => prepareCloseoutHandoff(state, { ...handoff, authority: 'Portfolio Viewer' })).toThrow('commercial director')
+    state = prepareCloseoutHandoff(state, handoff)
+    const response = { id: `response-${String(index)}`, expectedRevision: state.revision, authority: 'Commercial Director' as const, handoffId: handoff.id, packageId: handoff.packageId, recipient, decision: index === 2 ? 'correction-requested' as const : 'acknowledged' as const, receiptReference: `RECEIPT-${String(index)}`, rationale: 'Recipient requests a corrected custody record.', recordedBy: 'director', recordedOn: '2026-10-27' }
+    expect(() => recordCloseoutRecipientResponse(state, { ...response, packageId: 'WRONG' })).toThrow('exact handoff')
+    state = recordCloseoutRecipientResponse(state, response)
+    expect(recordCloseoutRecipientResponse(state, response)).toBe(state)
+  }
+  expect(getCloseoutHandoffStatus(state, command.projectId)).toMatchObject({ complete: false, recipients: [{ status: 'acknowledged' }, { status: 'acknowledged' }, { status: 'correction-requested' }] })
+  const corrected = assembleCloseoutEvidencePackage(state, { id: 'final-2', expectedRevision: state.revision, authority: 'Commercial Director', projectId: command.projectId, status: 'final', assembledBy: 'director', assembledOn: '2026-10-28' })
+  expect(() => recordCloseoutRecipientResponse(corrected, { id: 'stale-response', expectedRevision: corrected.revision, authority: 'Commercial Director', handoffId: 'handoff-0', packageId: 'final-1', recipient: 'Client representative', decision: 'acknowledged', receiptReference: 'LATE', rationale: '', recordedBy: 'director', recordedOn: '2026-10-29' })).toThrow('newer final package')
+  expect(getCloseoutHandoffStatus(corrected, command.projectId)).toMatchObject({ complete: false, recipients: [{ status: 'not prepared' }, { status: 'not prepared' }, { status: 'not prepared' }] })
+  expect(corrected.recipientResponses).toEqual(state.recipientResponses)
+  const old = { ...state } as Record<string, unknown>; delete old['handoffs']; delete old['recipientResponses']
+  const storage = { getItem: () => JSON.stringify(old), setItem: () => undefined }
+  expect(new BrowserCloseoutPersistence(storage).load()).toMatchObject({ handoffs: [], recipientResponses: [] })
+})
 
 describe('closeout portfolio intervention', () => {
   it('transfers responsibility and preserves immutable obligation lineage', () => {
