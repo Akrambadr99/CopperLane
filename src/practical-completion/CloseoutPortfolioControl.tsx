@@ -63,7 +63,7 @@ export function CloseoutPortfolioControl() {
           waiverRationale:
             "Minor training record accepted with retained commercial exposure.",
           waivedExposureCents: 40_000,
-          finalAccountReference: "FA-2026-009-FINAL",
+          finalAccountReference: state.finalAccounts.filter((item) => item.projectId === "PROJECT-SOUTH").at(-1)?.finalReference ?? "FA-2026-009-FINAL",
           custodyReference: "CUSTODY-882",
           authorizedBy: "director-closeout",
           closedOn: "2026-10-24",
