@@ -3,6 +3,7 @@ import { assessCloseoutPortfolio } from "./closeout-portfolio";
 import {
   BrowserCloseoutPersistence,
   CloseoutPortfolioRepository,
+  compareFinalAccountAdjustment,
   type PortfolioAuthority,
 } from "./closeout-control-domain";
 
@@ -17,6 +18,7 @@ export function CloseoutPortfolioControl() {
   const [authority, setAuthority] =
     useState<PortfolioAuthority>("Portfolio Viewer");
   const [message, setMessage] = useState("");
+  const [adjustmentDraft, setAdjustmentDraft] = useState({ category: "variation" as "variation" | "retention" | "claim", reason: "Approved variation must be reflected before final account closure.", amount: "25000", direction: "increase" as "increase" | "decrease", contractor: "MEP contractor", source: "VO-19", evidence: "VO-19", notes: "Approved commercial instruction supported by quantity surveyor evidence." });
   const feedback = useRef<HTMLParagraphElement>(null);
   const portfolio = assessCloseoutPortfolio(state.projects, "2026-10-20");
   const intervene = () => {
@@ -46,7 +48,8 @@ export function CloseoutPortfolioControl() {
     }
     queueMicrotask(() => feedback.current?.focus());
   };
-  const proposeAdjustment = () => { try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, projectId: "PROJECT-SOUTH", reason: "Approved variation must be reflected before final account closure.", category: "variation", valueCents: 25_000, evidenceIds: ["VO-19"], proposedBy: "commercial-manager", proposedOn: "2026-10-21" })); setMessage("Final-account adjustment proposed with commercial evidence."); } catch (error) { setMessage(error instanceof Error ? error.message : "Adjustment proposal failed."); } queueMicrotask(() => feedback.current?.focus()); };
+  const comparison = compareFinalAccountAdjustment(state, "PROJECT-SOUTH", Number(adjustmentDraft.amount) || 0, adjustmentDraft.direction);
+  const proposeAdjustment = () => { try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, projectId: "PROJECT-SOUTH", category: adjustmentDraft.category, commercialReason: adjustmentDraft.reason, amountCents: Number(adjustmentDraft.amount), direction: adjustmentDraft.direction, contractor: adjustmentDraft.contractor, sourceCommercialItem: adjustmentDraft.source, evidenceReference: adjustmentDraft.evidence, notes: adjustmentDraft.notes, proposedEffectiveRevision: (state.finalAccounts.at(-1)?.revision ?? 0) + 1, proposedBy: "commercial-manager", proposedOn: "2026-10-21" })); setMessage("Final-account adjustment proposed with commercial evidence."); } catch (error) { setMessage(error instanceof Error ? error.message : "Adjustment proposal failed."); } queueMicrotask(() => feedback.current?.focus()); };
   const reviewAdjustment = (decision: "accepted" | "rejected") => { const adjustment = state.adjustments.find((item) => item.status === "proposed"); if (!adjustment) return; try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, adjustmentId: adjustment.id, decision, reviewedBy: "commercial-director", reviewedOn: "2026-10-22" })); setMessage(`Final-account adjustment ${decision}.`); } catch (error) { setMessage(error instanceof Error ? error.message : "Adjustment review failed."); } queueMicrotask(() => feedback.current?.focus()); };
   const close = () => {
     try {
@@ -109,6 +112,7 @@ export function CloseoutPortfolioControl() {
       >
         Schedule overdue closeout intervention
       </button>
+      <fieldset><legend>Categorized final-account adjustment</legend><label>Category<select value={adjustmentDraft.category} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, category: event.target.value as typeof adjustmentDraft.category }); }}><option value="variation">Variation</option><option value="retention">Retention</option><option value="claim">Claim</option></select></label><label>Commercial reason<textarea value={adjustmentDraft.reason} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, reason: event.target.value }); }} /></label><label>Amount<input inputMode="numeric" value={adjustmentDraft.amount} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, amount: event.target.value }); }} /></label><label>Impact direction<select value={adjustmentDraft.direction} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, direction: event.target.value as typeof adjustmentDraft.direction }); }}><option value="increase">Increase</option><option value="decrease">Decrease</option></select></label><label>Contractor<input value={adjustmentDraft.contractor} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, contractor: event.target.value }); }} /></label><label>Source commercial item<input value={adjustmentDraft.source} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, source: event.target.value }); }} /></label><label>Evidence reference<input value={adjustmentDraft.evidence} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, evidence: event.target.value }); }} /></label><label>Rationale<textarea value={adjustmentDraft.notes} onChange={(event) => { setAdjustmentDraft({ ...adjustmentDraft, notes: event.target.value }); }} /></label><p aria-label="Final account comparison">Current {comparison.currentValueCents} · adjustment {comparison.adjustmentValueCents} · resulting {comparison.resultingValueCents}</p></fieldset>
       <button disabled={authority !== "Commercial Director" || state.adjustments.some((item) => item.status === "proposed") || state.closures.length > 0} onClick={proposeAdjustment}>Propose final-account adjustment</button>
       <button disabled={authority !== "Commercial Director" || !state.adjustments.some((item) => item.status === "proposed")} onClick={() => { reviewAdjustment("accepted"); }}>Accept current adjustment</button>
       <button disabled={authority !== "Commercial Director" || !state.adjustments.some((item) => item.status === "proposed")} onClick={() => { reviewAdjustment("rejected"); }}>Reject current adjustment</button>

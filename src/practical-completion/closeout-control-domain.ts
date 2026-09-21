@@ -23,7 +23,7 @@ export interface ProjectClosure { id: string; projectId: string; interventionId:
 export interface FinalAccountRecord { id: string; projectId: string; contractor: string; revision: number; sourceReference: string; finalReference: string; commercialExposureCents: number; approvedBy: string; approvedOn: string; immutable: true }
 export interface CloseoutDocumentCustodyRecord { id: string; projectId: string; documentReference: string; custodyReference: string; status: 'verified' | 'waived'; responsibleManager: string; recordedOn: string; closureId: string; immutable: true }
 export interface CloseoutWaiverRecord { id: string; projectId: string; closureId: string; waivedDocuments: number; authority: string; rationale: string; retainedExposureCents: number; recordedOn: string; immutable: true }
-export interface FinalAccountAdjustment { id: string; projectId: string; reason: string; category: 'variation' | 'retention' | 'claim'; valueCents: number; evidenceIds: string[]; submittedRevision: number; status: 'proposed' | 'accepted' | 'rejected' | 'superseded'; proposedBy: string; proposedOn: string; reviewedBy: string | null; reviewedOn: string | null; resultingAccountRevision: number | null; immutable: true }
+export interface FinalAccountAdjustment { id: string; projectId: string; reason: string; category: 'variation' | 'retention' | 'claim'; valueCents: number; evidenceIds: string[]; submittedRevision: number; status: 'proposed' | 'accepted' | 'rejected' | 'superseded'; proposedBy: string; proposedOn: string; reviewedBy: string | null; reviewedOn: string | null; resultingAccountRevision: number | null; direction?: 'increase' | 'decrease'; contractor?: string; sourceCommercialItem?: string; notes?: string; proposedEffectiveRevision?: number; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
   projects: ProjectCloseoutRecord[]
@@ -70,6 +70,34 @@ export function proposeFinalAccountAdjustment(state: CloseoutPortfolioState, com
   next.adjustments.push({ ...command, reason: command.reason.trim(), evidenceIds: [...command.evidenceIds], submittedRevision: state.revision, status: 'proposed', reviewedBy: null, reviewedOn: null, resultingAccountRevision: null, immutable: true })
   next.revision += 1
   return next
+}
+
+export interface CategorizedAdjustmentProposal { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; category: FinalAccountAdjustment['category']; commercialReason: string; amountCents: number; direction: 'increase' | 'decrease'; contractor: string; sourceCommercialItem: string; evidenceReference: string; notes: string; proposedEffectiveRevision: number; proposedBy: string; proposedOn: string }
+export function proposeCategorizedFinalAccountAdjustment(state: CloseoutPortfolioState, command: CategorizedAdjustmentProposal) {
+  if (state.adjustments.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', command.projectId, 'Closeout portfolio changed. Refresh before proposing the final-account adjustment.')
+  if (!closeoutPermissions(command.authority).canIntervene) throw new CloseoutControlError('UNAUTHORIZED', command.projectId, 'Only the commercial director can propose a final-account adjustment.')
+  const project = state.projects.find((item) => item.projectId === command.projectId)
+  if (!project) throw new Error('Closeout project was not found.')
+  if (state.closures.some((item) => item.projectId === command.projectId)) throw new CloseoutControlError('IMMUTABLE_CLOSURE', command.projectId, 'A closed project cannot receive a final-account adjustment.')
+  if (!command.contractor.trim() || command.contractor !== project.contractor || !command.sourceCommercialItem.trim() || command.notes.trim().length < 10) throw new CloseoutControlError('MISSING_EVIDENCE', command.projectId, 'Contractor, source commercial item, and adjustment rationale are required.')
+  if (!Number.isSafeInteger(command.amountCents) || command.amountCents <= 0) throw new CloseoutControlError('UNRESOLVED_OBLIGATION', command.projectId, 'Adjustment amount must be a positive whole number of cents.')
+  if (command.direction === 'decrease' && command.amountCents > project.commercialExposureCents) throw new CloseoutControlError('UNRESOLVED_OBLIGATION', command.projectId, 'Adjustment cannot reduce the current account below zero.')
+  const evidencePrefix = { variation: 'VO-', retention: 'RET-', claim: 'CLM-' }[command.category]
+  if (!evidencePrefix || !command.evidenceReference.startsWith(evidencePrefix)) throw new CloseoutControlError('MISSING_EVIDENCE', command.projectId, 'Evidence must use an approved commercial reference for its category.')
+  const currentRevision = getFinalAccountHistory(state, command.projectId).at(-1)?.revision ?? 0
+  if (command.proposedEffectiveRevision !== currentRevision + 1) throw new CloseoutControlError('STALE_REVISION', command.projectId, 'Proposed effective revision must follow the current final account.')
+  if (state.adjustments.some((item) => item.projectId === command.projectId && item.sourceCommercialItem === command.sourceCommercialItem && item.status !== 'rejected')) throw new CloseoutControlError('UNRESOLVED_OBLIGATION', command.projectId, 'This source commercial item already has an active adjustment.')
+  const next = proposeFinalAccountAdjustment(state, { id: command.id, expectedRevision: command.expectedRevision, authority: command.authority, projectId: command.projectId, reason: command.commercialReason, category: command.category, valueCents: command.direction === 'increase' ? command.amountCents : -command.amountCents, evidenceIds: [command.evidenceReference], proposedBy: command.proposedBy, proposedOn: command.proposedOn })
+  const adjustment = next.adjustments.find((item) => item.id === command.id)
+  if (adjustment) Object.assign(adjustment, { direction: command.direction, contractor: command.contractor.trim(), sourceCommercialItem: command.sourceCommercialItem.trim(), notes: command.notes.trim(), proposedEffectiveRevision: command.proposedEffectiveRevision })
+  return next
+}
+
+export function compareFinalAccountAdjustment(state: CloseoutPortfolioState, projectId: string, amountCents: number, direction: 'increase' | 'decrease') {
+  const currentValueCents = getFinalAccountHistory(state, projectId).at(-1)?.commercialExposureCents ?? state.projects.find((item) => item.projectId === projectId)?.commercialExposureCents ?? 0
+  const adjustmentValueCents = direction === 'increase' ? amountCents : -amountCents
+  return { currentValueCents, adjustmentValueCents, resultingValueCents: Math.max(0, currentValueCents + adjustmentValueCents) }
 }
 
 interface ReviewFinalAccountAdjustment { id: string; expectedRevision: number; authority: PortfolioAuthority; adjustmentId: string; decision: 'accepted' | 'rejected'; reviewedBy: string; reviewedOn: string }
@@ -184,9 +212,9 @@ export class CloseoutPortfolioRepository {
   private readonly persistence: CloseoutPersistence
   constructor(persistence: CloseoutPersistence) { this.persistence = persistence }
   read(): CloseoutPortfolioState { return this.persistence.load() ?? structuredClone(initialCloseoutPortfolioState) }
-  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment) {
+  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal) {
     const current = this.read()
-    const next = 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
+    const next = 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
     if (next !== current) this.persistence.save(next)
     return next
   }
