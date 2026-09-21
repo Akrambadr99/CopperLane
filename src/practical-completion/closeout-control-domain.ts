@@ -27,7 +27,7 @@ export interface FinalAccountAdjustment { id: string; projectId: string; reason:
 export interface CloseoutEvidencePackage { id: string; projectId: string; status: 'preliminary' | 'final'; sourceRevision: number; accountId: string | null; accountRevision: number; acceptedAdjustmentIds: string[]; closureId: string | null; custodyIds: string[]; waiverIds: string[]; openDocumentCount: number; assembledBy: string; assembledOn: string; immutable: true }
 export type CloseoutRecipient = 'Client representative' | 'Commercial manager' | 'Main contractor'
 export const requiredCloseoutRecipients: CloseoutRecipient[] = ['Client representative', 'Commercial manager', 'Main contractor']
-export interface CloseoutHandoff { id: string; projectId: string; packageId: string; packageSourceRevision: number; recipient: CloseoutRecipient; preparedBy: string; preparedOn: string; immutable: true }
+export interface CloseoutHandoff { id: string; projectId: string; packageId: string; packageSourceRevision: number; recipient: CloseoutRecipient; recipientIdentity?: string; dueOn?: string; previousHandoffId?: string; reassignmentReason?: string; preparedBy: string; preparedOn: string; immutable: true }
 export interface CloseoutRecipientResponse { id: string; handoffId: string; packageId: string; recipient: CloseoutRecipient; decision: 'acknowledged' | 'correction-requested'; receiptReference: string; rationale: string; recordedBy: string; recordedOn: string; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
@@ -67,7 +67,7 @@ export const initialCloseoutPortfolioState: CloseoutPortfolioState = {
   recipientResponses: [],
 }
 
-export function prepareCloseoutHandoff(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; packageId: string; recipient: CloseoutRecipient; preparedBy: string; preparedOn: string }) {
+export function prepareCloseoutHandoff(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; packageId: string; recipient: CloseoutRecipient; recipientIdentity?: string; dueOn?: string; preparedBy: string; preparedOn: string }) {
   if (state.handoffs.some((item) => item.id === command.id)) return state
   const pkg = state.evidencePackages.find((item) => item.id === command.packageId)
   if (!pkg) throw new Error('A final closeout package is required for recipient handoff.')
@@ -78,7 +78,22 @@ export function prepareCloseoutHandoff(state: CloseoutPortfolioState, command: {
   if (!requiredCloseoutRecipients.includes(command.recipient) || !command.preparedBy.trim()) throw new Error('A required recipient and preparing operator are needed.')
   if (state.handoffs.some((item) => item.packageId === pkg.id && item.recipient === command.recipient)) throw new Error('This recipient already has a handoff for the selected package.')
   const next = structuredClone(state)
-  next.handoffs.push({ id: command.id, projectId: pkg.projectId, packageId: pkg.id, packageSourceRevision: pkg.sourceRevision, recipient: command.recipient, preparedBy: command.preparedBy.trim(), preparedOn: command.preparedOn, immutable: true })
+  next.handoffs.push({ id: command.id, projectId: pkg.projectId, packageId: pkg.id, packageSourceRevision: pkg.sourceRevision, recipient: command.recipient, recipientIdentity: command.recipientIdentity?.trim() ? command.recipientIdentity.trim() : command.recipient, ...(command.dueOn ? { dueOn: command.dueOn } : {}), preparedBy: command.preparedBy.trim(), preparedOn: command.preparedOn, immutable: true })
+  next.revision += 1
+  return next
+}
+
+export function reassignCloseoutHandoff(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; handoffId: string; recipientIdentity: string; dueOn: string; reason: string; reassignedBy: string; reassignedOn: string }) {
+  if (state.handoffs.some((item) => item.id === command.id)) return state
+  const handoff = state.handoffs.find((item) => item.id === command.handoffId)
+  if (!handoff) throw new Error('A current recipient handoff is required for reassignment.')
+  if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', handoff.projectId, 'Closeout changed. Refresh before reassigning the recipient.')
+  if (!closeoutPermissions(command.authority).canAuthorizeClosure) throw new CloseoutControlError('UNAUTHORIZED', handoff.projectId, 'Only the commercial director can reassign a recipient handoff.')
+  if (state.evidencePackages.filter((item) => item.projectId === handoff.projectId && item.status === 'final').at(-1)?.id !== handoff.packageId) throw new Error('A newer final package requires its own recipient obligation.')
+  if (state.handoffs.filter((item) => item.packageId === handoff.packageId && item.recipient === handoff.recipient).at(-1)?.id !== handoff.id || state.recipientResponses.some((item) => item.handoffId === handoff.id)) throw new Error('Only an unanswered current handoff can be reassigned.')
+  if (!command.recipientIdentity.trim() || command.recipientIdentity.trim() === (handoff.recipientIdentity ?? handoff.recipient) || command.reason.trim().length < 15 || !command.reassignedBy.trim() || command.dueOn <= command.reassignedOn) throw new Error('A different recipient, future due date, operator, and reassignment reason are required.')
+  const next = structuredClone(state)
+  next.handoffs.push({ id: command.id, projectId: handoff.projectId, packageId: handoff.packageId, packageSourceRevision: handoff.packageSourceRevision, recipient: handoff.recipient, recipientIdentity: command.recipientIdentity.trim(), dueOn: command.dueOn, previousHandoffId: handoff.id, reassignmentReason: command.reason.trim(), preparedBy: command.reassignedBy.trim(), preparedOn: command.reassignedOn, immutable: true })
   next.revision += 1
   return next
 }
@@ -90,6 +105,7 @@ export function recordCloseoutRecipientResponse(state: CloseoutPortfolioState, c
   if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', handoff.projectId, 'Closeout changed. Refresh before recording recipient response.')
   if (!closeoutPermissions(command.authority).canAuthorizeClosure) throw new CloseoutControlError('UNAUTHORIZED', handoff.projectId, 'Only the commercial director can record verified recipient response evidence.')
   if (handoff.packageId !== command.packageId || handoff.recipient !== command.recipient) throw new Error('Recipient response must reference the exact handoff, package, and recipient.')
+  if (state.handoffs.filter((item) => item.packageId === handoff.packageId && item.recipient === handoff.recipient).at(-1)?.id !== handoff.id) throw new Error('Recipient handoff was reassigned; record evidence against its current recipient.')
   if (state.evidencePackages.filter((item) => item.projectId === handoff.projectId && item.status === 'final').at(-1)?.id !== handoff.packageId) throw new Error('A newer final package requires a new recipient handoff.')
   if (state.recipientResponses.some((item) => item.handoffId === handoff.id)) throw new Error('This handoff already has a recorded recipient response.')
   if (!command.receiptReference.trim() || !command.recordedBy.trim() || (command.decision === 'correction-requested' && command.rationale.trim().length < 15)) throw new Error('Receipt evidence, operator, and correction rationale are required.')
@@ -99,9 +115,9 @@ export function recordCloseoutRecipientResponse(state: CloseoutPortfolioState, c
   return next
 }
 
-export function getCloseoutHandoffStatus(state: CloseoutPortfolioState, projectId: string) {
+export function getCloseoutHandoffStatus(state: CloseoutPortfolioState, projectId: string, asOf?: string) {
   const pkg = state.evidencePackages.filter((item) => item.projectId === projectId && item.status === 'final').at(-1) ?? null
-  const recipients = requiredCloseoutRecipients.map((recipient) => { const handoff = state.handoffs.find((item) => item.packageId === pkg?.id && item.recipient === recipient) ?? null; const response = state.recipientResponses.find((item) => item.handoffId === handoff?.id) ?? null; return { recipient, handoff, response, status: !handoff ? 'not prepared' as const : !response ? 'awaiting manual receipt' as const : response.decision } })
+  const recipients = requiredCloseoutRecipients.map((recipient) => { const handoff = state.handoffs.filter((item) => item.packageId === pkg?.id && item.recipient === recipient).at(-1) ?? null; const response = state.recipientResponses.find((item) => item.handoffId === handoff?.id) ?? null; return { recipient, handoff, response, status: !handoff ? 'not prepared' as const : !response ? asOf && handoff.dueOn && asOf > handoff.dueOn ? 'overdue' as const : 'awaiting manual receipt' as const : response.decision } })
   return { package: pkg, recipients, complete: Boolean(pkg) && recipients.every((item) => item.status === 'acknowledged') }
 }
 
@@ -278,9 +294,9 @@ export class CloseoutPortfolioRepository {
   private readonly persistence: CloseoutPersistence
   constructor(persistence: CloseoutPersistence) { this.persistence = persistence }
   read(): CloseoutPortfolioState { return this.persistence.load() ?? structuredClone(initialCloseoutPortfolioState) }
-  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence | Parameters<typeof prepareCloseoutHandoff>[1] | Parameters<typeof recordCloseoutRecipientResponse>[1]) {
+  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence | Parameters<typeof prepareCloseoutHandoff>[1] | Parameters<typeof reassignCloseoutHandoff>[1] | Parameters<typeof recordCloseoutRecipientResponse>[1]) {
     const current = this.read()
-    const next = 'receiptReference' in command ? recordCloseoutRecipientResponse(current, command) : 'packageId' in command ? prepareCloseoutHandoff(current, command) : 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
+    const next = 'receiptReference' in command ? recordCloseoutRecipientResponse(current, command) : 'handoffId' in command ? reassignCloseoutHandoff(current, command) : 'packageId' in command ? prepareCloseoutHandoff(current, command) : 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
     if (next !== current) this.persistence.save(next)
     return next
   }
