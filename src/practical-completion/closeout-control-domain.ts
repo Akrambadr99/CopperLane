@@ -20,11 +20,17 @@ export interface CloseoutIntervention {
   immutable: true
 }
 export interface ProjectClosure { id: string; projectId: string; interventionId: string; evidenceIds: string[]; satisfiedDocuments: number; waivedDocuments: number; waiverAuthority: string | null; waiverRationale: string | null; waivedExposureCents: number; finalAccountReference: string; custodyReference: string; authorizedBy: string; closedOn: string; immutable: true }
+export interface FinalAccountRecord { id: string; projectId: string; contractor: string; revision: number; sourceReference: string; finalReference: string; commercialExposureCents: number; approvedBy: string; approvedOn: string; immutable: true }
+export interface CloseoutDocumentCustodyRecord { id: string; projectId: string; documentReference: string; custodyReference: string; status: 'verified' | 'waived'; responsibleManager: string; recordedOn: string; closureId: string; immutable: true }
+export interface CloseoutWaiverRecord { id: string; projectId: string; closureId: string; waivedDocuments: number; authority: string; rationale: string; retainedExposureCents: number; recordedOn: string; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
   projects: ProjectCloseoutRecord[]
   interventions: CloseoutIntervention[]
   closures: ProjectClosure[]
+  finalAccounts: FinalAccountRecord[]
+  documentCustody: CloseoutDocumentCustodyRecord[]
+  waivers: CloseoutWaiverRecord[]
 }
 export interface ScheduleCloseoutIntervention {
   id: string
@@ -42,6 +48,9 @@ export const initialCloseoutPortfolioState: CloseoutPortfolioState = {
   projects: structuredClone(seededCloseoutPortfolio),
   interventions: [],
   closures: [],
+  finalAccounts: [],
+  documentCustody: [],
+  waivers: [],
 }
 
 export function scheduleCloseoutIntervention(state: CloseoutPortfolioState, command: ScheduleCloseoutIntervention) {
@@ -88,11 +97,17 @@ export function authorizeProjectClosure(state: CloseoutPortfolioState, command: 
   const target = next.projects.find((item) => item.projectId === project.projectId)
   if (!target) throw new Error('Project disappeared during closure.')
   next.closures.push({ ...command, interventionId: intervention.id, evidenceIds: [...command.evidenceIds], waiverRationale: command.waiverRationale?.trim() ?? null, immutable: true })
+  next.finalAccounts.push({ id: `${command.id}:account`, projectId: project.projectId, contractor: project.contractor, revision: next.finalAccounts.filter((item) => item.projectId === project.projectId).length + 1, sourceReference: project.sourceReference, finalReference: command.finalAccountReference, commercialExposureCents: command.waivedExposureCents, approvedBy: command.authorizedBy, approvedOn: command.closedOn, immutable: true })
+  next.documentCustody.push(...command.evidenceIds.map((documentReference, index) => ({ id: `${command.id}:document:${String(index + 1)}`, projectId: project.projectId, documentReference, custodyReference: command.custodyReference, status: 'verified' as const, responsibleManager: command.authorizedBy, recordedOn: command.closedOn, closureId: command.id, immutable: true as const })))
+  if (command.waivedDocuments > 0 && command.waiverAuthority && command.waiverRationale) next.waivers.push({ id: `${command.id}:waiver`, projectId: project.projectId, closureId: command.id, waivedDocuments: command.waivedDocuments, authority: command.waiverAuthority, rationale: command.waiverRationale.trim(), retainedExposureCents: command.waivedExposureCents, recordedOn: command.closedOn, immutable: true })
   target.openDocuments = 0
   target.commercialExposureCents = command.waivedExposureCents
   next.revision += 1
   return next
 }
+
+export function getFinalAccountHistory(state: CloseoutPortfolioState, projectId: string) { return state.finalAccounts.filter((item) => item.projectId === projectId).sort((a, b) => a.revision - b.revision) }
+export function getCloseoutDocumentHistory(state: CloseoutPortfolioState, projectId: string) { return state.documentCustody.filter((item) => item.projectId === projectId).map((item) => ({ ...item, waiver: state.waivers.find((waiver) => waiver.closureId === item.closureId) ?? null })) }
 
 export function queryProjectCloseoutHistory(state: CloseoutPortfolioState, projectId: string) {
   return [
@@ -106,7 +121,7 @@ export class BrowserCloseoutPersistence implements CloseoutPersistence {
   static key = 'buildledger:closeout-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); return raw ? JSON.parse(raw) as CloseoutPortfolioState : null }
+  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [] } }
   save(next: CloseoutPortfolioState) { this.storage.setItem(BrowserCloseoutPersistence.key, JSON.stringify(next)) }
 }
 export class CloseoutPortfolioRepository {

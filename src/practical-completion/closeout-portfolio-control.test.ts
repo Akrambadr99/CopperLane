@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { authorizeProjectClosure, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, initialCloseoutPortfolioState, queryProjectCloseoutHistory, scheduleCloseoutIntervention, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
+import { authorizeProjectClosure, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, getCloseoutDocumentHistory, getFinalAccountHistory, initialCloseoutPortfolioState, queryProjectCloseoutHistory, scheduleCloseoutIntervention, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
 
 const command = { id: 'intervention-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }
 
@@ -27,6 +27,9 @@ describe('evidence-based project closure', () => {
     const closed = authorizeProjectClosure(active, closure)
     expect(closed.projects.find((item) => item.projectId === 'PROJECT-SOUTH')).toMatchObject({ openDocuments: 0, commercialExposureCents: 40_000 })
     expect(closed.closures[0]).toMatchObject({ interventionId: 'intervention-1', waivedDocuments: 1, immutable: true })
+    expect(getFinalAccountHistory(closed, 'PROJECT-SOUTH')[0]).toMatchObject({ sourceReference: 'FA-2026-009', finalReference: 'FA-FINAL', revision: 1, immutable: true })
+    expect(getCloseoutDocumentHistory(closed, 'PROJECT-SOUTH')).toHaveLength(2)
+    expect(closed.waivers[0]).toMatchObject({ waivedDocuments: 1, retainedExposureCents: 40_000, immutable: true })
   })
   it('blocks incomplete reconciliation and stale approval atomically', () => {
     const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
