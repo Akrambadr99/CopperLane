@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react'
 import { assessCloseoutPortfolio } from './closeout-portfolio'
-import { CloseoutPortfolioRepository, type PortfolioAuthority } from './closeout-control-domain'
+import { BrowserCloseoutPersistence, CloseoutPortfolioRepository, type PortfolioAuthority } from './closeout-control-domain'
 
 export function CloseoutPortfolioControl() {
-  const [repository] = useState(() => new CloseoutPortfolioRepository(localStorage))
+  const [repository] = useState(() => new CloseoutPortfolioRepository(new BrowserCloseoutPersistence(localStorage)))
   const [state, setState] = useState(() => repository.read())
   const [authority, setAuthority] = useState<PortfolioAuthority>('Portfolio Viewer')
   const [message, setMessage] = useState('')

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { authorizeProjectClosure, closeoutPermissions, initialCloseoutPortfolioState, queryProjectCloseoutHistory, scheduleCloseoutIntervention } from './closeout-control-domain'
+import { authorizeProjectClosure, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, initialCloseoutPortfolioState, queryProjectCloseoutHistory, scheduleCloseoutIntervention, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
 
 const command = { id: 'intervention-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }
 
@@ -47,4 +47,5 @@ describe('evidence-based project closure', () => {
     expect(queryProjectCloseoutHistory(closed, 'PROJECT-SOUTH').map((item) => [item.kind, item.actor])).toEqual([['intervention', 'director-closeout'], ['closure', 'director-closeout']])
     expect(queryProjectCloseoutHistory(closed, 'PROJECT-SOUTH')[1]?.evidence).toContain('FA-FINAL')
   })
+  it('persists one atomic snapshot and exposes stable failure context', () => { let durable: CloseoutPortfolioState | null = null; let writes = 0; const persistence: CloseoutPersistence = { load: () => durable, save: (next) => { durable = structuredClone(next); writes += 1 } }; const repository = new CloseoutPortfolioRepository(persistence); repository.dispatch(command); expect(writes).toBe(1); expect(repository.read().revision).toBe(1); try { repository.dispatch({ ...command, id: 'stale', expectedRevision: 0 }) } catch (error) { expect(error).toBeInstanceOf(CloseoutControlError); expect(error).toMatchObject({ code: 'STALE_REVISION', projectId: 'PROJECT-SOUTH' }) } expect(writes).toBe(1) })
 })

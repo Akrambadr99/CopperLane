@@ -174,6 +174,7 @@ test('submittal rejection, revised evidence and executive release survive reload
 });
 
 test('punch correction requires independent verification and survives reload', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-09-19T09:00:00Z'));
   await page.goto('/operations');
   const actor = page.getByRole('combobox', { name: 'Current actor' });
   const dialog = page.getByRole('dialog');
@@ -199,6 +200,7 @@ test('punch correction requires independent verification and survives reload', a
 });
 
 test('released submittal package completes only after its field inspection passes',async({page})=>{
+ await page.clock.setFixedTime(new Date('2026-09-19T09:00:00Z'));
  await page.goto('/operations');const actor=page.getByRole('combobox',{name:'Current actor'}),dialog=page.getByRole('dialog');
  const save=async()=>{await dialog.getByRole('button',{name:'Save command',exact:true}).click();await expect(dialog).toHaveCount(0)};
  await actor.selectOption('actor-1');await page.getByRole('button',{name:/^Drawing revisions/}).click();await page.getByRole('button',{name:'Issue construction drawing'}).click();await save();
