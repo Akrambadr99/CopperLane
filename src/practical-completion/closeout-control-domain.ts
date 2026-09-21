@@ -24,6 +24,7 @@ export interface FinalAccountRecord { id: string; projectId: string; contractor:
 export interface CloseoutDocumentCustodyRecord { id: string; projectId: string; documentReference: string; custodyReference: string; status: 'verified' | 'waived'; responsibleManager: string; recordedOn: string; closureId: string; immutable: true }
 export interface CloseoutWaiverRecord { id: string; projectId: string; closureId: string; waivedDocuments: number; authority: string; rationale: string; retainedExposureCents: number; recordedOn: string; immutable: true }
 export interface FinalAccountAdjustment { id: string; projectId: string; reason: string; category: 'variation' | 'retention' | 'claim'; valueCents: number; evidenceIds: string[]; submittedRevision: number; status: 'proposed' | 'accepted' | 'rejected' | 'superseded'; proposedBy: string; proposedOn: string; reviewedBy: string | null; reviewedOn: string | null; resultingAccountRevision: number | null; direction?: 'increase' | 'decrease'; contractor?: string; sourceCommercialItem?: string; notes?: string; proposedEffectiveRevision?: number; immutable: true }
+export interface CloseoutEvidencePackage { id: string; projectId: string; status: 'preliminary' | 'final'; sourceRevision: number; accountId: string | null; accountRevision: number; acceptedAdjustmentIds: string[]; closureId: string | null; custodyIds: string[]; waiverIds: string[]; openDocumentCount: number; assembledBy: string; assembledOn: string; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
   projects: ProjectCloseoutRecord[]
@@ -33,6 +34,7 @@ export interface CloseoutPortfolioState {
   documentCustody: CloseoutDocumentCustodyRecord[]
   waivers: CloseoutWaiverRecord[]
   adjustments: FinalAccountAdjustment[]
+  evidencePackages: CloseoutEvidencePackage[]
 }
 export interface ScheduleCloseoutIntervention {
   id: string
@@ -54,6 +56,24 @@ export const initialCloseoutPortfolioState: CloseoutPortfolioState = {
   documentCustody: [],
   waivers: [],
   adjustments: [],
+  evidencePackages: [],
+}
+
+interface AssembleCloseoutEvidence { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; status: 'preliminary' | 'final'; assembledBy: string; assembledOn: string }
+export function assembleCloseoutEvidencePackage(state: CloseoutPortfolioState, command: AssembleCloseoutEvidence) {
+  if (state.evidencePackages.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', command.projectId, 'Closeout changed. Refresh before assembling the evidence package.')
+  if (!closeoutPermissions(command.authority).canAuthorizeClosure) throw new CloseoutControlError('UNAUTHORIZED', command.projectId, 'Only the commercial director can assemble a governed closeout package.')
+  const project = state.projects.find((item) => item.projectId === command.projectId)
+  if (!project) throw new Error('Closeout project was not found.')
+  const closure = state.closures.find((item) => item.projectId === command.projectId) ?? null
+  if (command.status === 'final' && (!closure || project.openDocuments !== 0 || state.adjustments.some((item) => item.projectId === command.projectId && item.status === 'proposed'))) throw new CloseoutControlError('UNRESOLVED_OBLIGATION', command.projectId, 'A final package requires completed closure, documents, and commercial decisions.')
+  if (command.status === 'preliminary' && closure) throw new CloseoutControlError('IMMUTABLE_CLOSURE', command.projectId, 'A closed project requires a final evidence package.')
+  const account = getFinalAccountHistory(state, command.projectId).at(-1) ?? null
+  const next = structuredClone(state)
+  next.evidencePackages.push({ id: command.id, projectId: command.projectId, status: command.status, sourceRevision: state.revision, accountId: account?.id ?? null, accountRevision: account?.revision ?? 0, acceptedAdjustmentIds: state.adjustments.filter((item) => item.projectId === command.projectId && item.status === 'accepted').map((item) => item.id), closureId: closure?.id ?? null, custodyIds: state.documentCustody.filter((item) => item.projectId === command.projectId).map((item) => item.id), waiverIds: state.waivers.filter((item) => item.projectId === command.projectId).map((item) => item.id), openDocumentCount: project.openDocuments, assembledBy: command.assembledBy, assembledOn: command.assembledOn, immutable: true })
+  next.revision += 1
+  return next
 }
 
 interface ProposeFinalAccountAdjustment { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; reason: string; category: FinalAccountAdjustment['category']; valueCents: number; evidenceIds: string[]; proposedBy: string; proposedOn: string }
@@ -205,16 +225,16 @@ export class BrowserCloseoutPersistence implements CloseoutPersistence {
   static key = 'buildledger:closeout-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [] } }
+  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [] } }
   save(next: CloseoutPortfolioState) { this.storage.setItem(BrowserCloseoutPersistence.key, JSON.stringify(next)) }
 }
 export class CloseoutPortfolioRepository {
   private readonly persistence: CloseoutPersistence
   constructor(persistence: CloseoutPersistence) { this.persistence = persistence }
   read(): CloseoutPortfolioState { return this.persistence.load() ?? structuredClone(initialCloseoutPortfolioState) }
-  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal) {
+  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence) {
     const current = this.read()
-    const next = 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
+    const next = 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
     if (next !== current) this.persistence.save(next)
     return next
   }

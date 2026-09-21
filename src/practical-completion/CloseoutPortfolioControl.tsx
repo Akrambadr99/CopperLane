@@ -18,6 +18,7 @@ export function CloseoutPortfolioControl() {
   const [authority, setAuthority] =
     useState<PortfolioAuthority>("Portfolio Viewer");
   const [message, setMessage] = useState("");
+  const [selectedPackageId, setSelectedPackageId] = useState<string | null>(null);
   const [adjustmentDraft, setAdjustmentDraft] = useState({ category: "variation" as "variation" | "retention" | "claim", reason: "Approved variation must be reflected before final account closure.", amount: "25000", direction: "increase" as "increase" | "decrease", contractor: "MEP contractor", source: "VO-19", evidence: "VO-19", notes: "Approved commercial instruction supported by quantity surveyor evidence." });
   const feedback = useRef<HTMLParagraphElement>(null);
   const portfolio = assessCloseoutPortfolio(state.projects, "2026-10-20");
@@ -49,6 +50,8 @@ export function CloseoutPortfolioControl() {
     queueMicrotask(() => feedback.current?.focus());
   };
   const comparison = compareFinalAccountAdjustment(state, "PROJECT-SOUTH", Number(adjustmentDraft.amount) || 0, adjustmentDraft.direction);
+  const selectedPackage = state.evidencePackages.find((item) => item.id === selectedPackageId) ?? state.evidencePackages.at(-1);
+  const assemblePackage = () => { try { const id = crypto.randomUUID(); const next = repository.dispatch({ id, expectedRevision: state.revision, authority, projectId: "PROJECT-SOUTH", status: state.closures.length > 0 ? "final" : "preliminary", assembledBy: "commercial-director", assembledOn: "2026-10-25" }); setState(next); setSelectedPackageId(id); setMessage("Governed closeout evidence package assembled from pinned source records."); } catch (error) { setMessage(error instanceof Error ? error.message : "Package assembly failed."); } queueMicrotask(() => feedback.current?.focus()); };
   const proposeAdjustment = () => { try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, projectId: "PROJECT-SOUTH", category: adjustmentDraft.category, commercialReason: adjustmentDraft.reason, amountCents: Number(adjustmentDraft.amount), direction: adjustmentDraft.direction, contractor: adjustmentDraft.contractor, sourceCommercialItem: adjustmentDraft.source, evidenceReference: adjustmentDraft.evidence, notes: adjustmentDraft.notes, proposedEffectiveRevision: (state.finalAccounts.at(-1)?.revision ?? 0) + 1, proposedBy: "commercial-manager", proposedOn: "2026-10-21" })); setMessage("Final-account adjustment proposed with commercial evidence."); } catch (error) { setMessage(error instanceof Error ? error.message : "Adjustment proposal failed."); } queueMicrotask(() => feedback.current?.focus()); };
   const reviewAdjustment = (decision: "accepted" | "rejected") => { const adjustment = state.adjustments.find((item) => item.status === "proposed"); if (!adjustment) return; try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, adjustmentId: adjustment.id, decision, reviewedBy: "commercial-director", reviewedOn: "2026-10-22" })); setMessage(`Final-account adjustment ${decision}.`); } catch (error) { setMessage(error instanceof Error ? error.message : "Adjustment review failed."); } queueMicrotask(() => feedback.current?.focus()); };
   const close = () => {
@@ -127,6 +130,9 @@ export function CloseoutPortfolioControl() {
       >
         Authorize evidence-based project closure
       </button>
+      <button disabled={authority !== "Commercial Director"} onClick={assemblePackage}>Assemble closeout evidence package</button>
+      {selectedPackage && <section aria-label="Closeout package preview"><h3>{selectedPackage.status} closeout package</h3><p>Assembled {selectedPackage.assembledOn} by {selectedPackage.assembledBy} · source revision {selectedPackage.sourceRevision} · final account revision {selectedPackage.accountRevision}</p><p>Accepted adjustments {selectedPackage.acceptedAdjustmentIds.length} · open documents at assembly {selectedPackage.openDocumentCount} · custody records {selectedPackage.custodyIds.length} · waivers {selectedPackage.waiverIds.length} · closure {selectedPackage.closureId ?? "pending"}</p><a download={`closeout-${selectedPackage.id}.json`} href={`data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(selectedPackage, null, 2))}`}>Export pinned package manifest</a></section>}
+      <ol aria-label="Closeout evidence packages">{state.evidencePackages.map((item) => <li key={item.id}><button onClick={() => { setSelectedPackageId(item.id); }}>{item.status} · {item.assembledOn} · source revision {item.sourceRevision}</button></li>)}</ol>
       {message && (
         <p ref={feedback} tabIndex={-1} role="status">
           {message}
