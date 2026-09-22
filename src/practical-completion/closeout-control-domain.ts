@@ -27,11 +27,19 @@ export interface FinalAccountAdjustment { id: string; projectId: string; reason:
 export interface CloseoutEvidencePackage { id: string; projectId: string; status: 'preliminary' | 'final'; sourceRevision: number; accountId: string | null; accountRevision: number; acceptedAdjustmentIds: string[]; closureId: string | null; custodyIds: string[]; waiverIds: string[]; openDocumentCount: number; assembledBy: string; assembledOn: string; immutable: true }
 export type CloseoutRecipient = 'Client representative' | 'Commercial manager' | 'Main contractor' | 'Independent certifier'
 export const requiredCloseoutRecipients: CloseoutRecipient[] = ['Client representative', 'Commercial manager', 'Main contractor']
+export type CloseoutContentScope = 'final account' | 'commercial adjustments' | 'closeout documents' | 'waivers' | 'custody evidence' | 'final closure evidence'
+export const closeoutContentScopes: readonly CloseoutContentScope[] = ['final account', 'commercial adjustments', 'closeout documents', 'waivers', 'custody evidence', 'final closure evidence']
+export const defaultRecipientContentScope: Record<CloseoutRecipient, readonly CloseoutContentScope[]> = {
+  'Client representative': closeoutContentScopes,
+  'Commercial manager': ['final account', 'commercial adjustments', 'waivers'],
+  'Main contractor': ['final account', 'commercial adjustments', 'closeout documents', 'custody evidence', 'final closure evidence'],
+  'Independent certifier': closeoutContentScopes,
+}
 export interface CloseoutHandoff { id: string; projectId: string; packageId: string; packageSourceRevision: number; recipient: CloseoutRecipient; recipientIdentity?: string; dueOn?: string; previousHandoffId?: string; reassignmentReason?: string; preparedBy: string; preparedOn: string; immutable: true }
 export interface CloseoutRecipientResponse { id: string; handoffId: string; packageId: string; recipient: CloseoutRecipient; decision: 'acknowledged' | 'correction-requested'; receiptReference: string; rationale: string; recordedBy: string; recordedOn: string; immutable: true }
 export interface RecipientSubstitution { id: string; handoffId: string; replacementHandoffId: string; packageId: string; packageSourceRevision: number; originalRecipient: string; substituteRecipient: string; reason: 'responsibility changed' | 'representative replaced' | 'contact superseded'; approvalReference: string; approvedBy: string; approvedOn: string; immutable: true }
-export interface RecipientPolicyRevision { id: string; projectId: string; packageId: string; revision: number; requiredRecipients: CloseoutRecipient[]; introduced: CloseoutRecipient[]; retired: CloseoutRecipient[]; reason: string; approvedBy: string; effectiveOn: string; immutable: true }
-export interface RecipientSupersessionPolicy { id: string; projectId: string; recipient: CloseoutRecipient; previousPackageId: string; currentPackageId: string; previousResponseId: string; changedScope: string[]; decision: 'retain acknowledgement' | 'renew acknowledgement'; rationale: string; authorizedBy: string; authorizedOn: string; immutable: true }
+export interface RecipientPolicyRevision { id: string; projectId: string; packageId: string; revision: number; requiredRecipients: CloseoutRecipient[]; scopeByRecipient?: Partial<Record<CloseoutRecipient, CloseoutContentScope[]>>; introduced: CloseoutRecipient[]; retired: CloseoutRecipient[]; reason: string; approvedBy: string; effectiveOn: string; immutable: true }
+export interface RecipientSupersessionPolicy { id: string; projectId: string; recipient: CloseoutRecipient; previousPackageId: string; currentPackageId: string; previousResponseId: string; changedScope: string[]; contentScopes?: CloseoutContentScope[]; recipientPolicyRevision?: number; decision: 'retain acknowledgement' | 'renew acknowledgement'; rationale: string; authorizedBy: string; authorizedOn: string; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
   projects: ProjectCloseoutRecord[]
@@ -80,7 +88,11 @@ export function currentRequiredRecipients(state: CloseoutPortfolioState, project
   return state.recipientPolicyRevisions.filter((item) => item.projectId === projectId).at(-1)?.requiredRecipients ?? requiredCloseoutRecipients
 }
 
-export function changeCloseoutRecipientPolicy(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; packageId: string; requiredRecipients: readonly CloseoutRecipient[]; reason: string; approvedBy: string; effectiveOn: string }) {
+export function currentRecipientContentScope(state: CloseoutPortfolioState, projectId: string, recipient: CloseoutRecipient): readonly CloseoutContentScope[] {
+  return state.recipientPolicyRevisions.filter((item) => item.projectId === projectId).at(-1)?.scopeByRecipient?.[recipient] ?? defaultRecipientContentScope[recipient]
+}
+
+export function changeCloseoutRecipientPolicy(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; packageId: string; requiredRecipients: readonly CloseoutRecipient[]; scopeByRecipient?: Partial<Record<CloseoutRecipient, CloseoutContentScope[]>>; reason: string; approvedBy: string; effectiveOn: string }) {
   if (state.recipientPolicyRevisions.some((item) => item.id === command.id)) return state
   if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', command.projectId, 'Closeout changed. Refresh before revising recipient policy.')
   if (!closeoutPermissions(command.authority).canAuthorizeClosure) throw new CloseoutControlError('UNAUTHORIZED', command.projectId, 'Only the commercial director can revise recipient policy.')
@@ -88,19 +100,43 @@ export function changeCloseoutRecipientPolicy(state: CloseoutPortfolioState, com
   if (pkg?.id !== command.packageId) throw new Error('Policy must apply to the current final package revision.')
   const prior = currentRequiredRecipients(state, command.projectId)
   const required = command.requiredRecipients
-  if (!required.length || new Set(required).size !== required.length || required.some((item) => ![...requiredCloseoutRecipients, 'Independent certifier'].includes(item)) || (required.length === prior.length && required.every((item) => prior.includes(item)))) throw new Error('Recipient policy needs a distinct nonempty set of known recipients.')
+  if (!required.length || new Set(required).size !== required.length || required.some((item) => ![...requiredCloseoutRecipients, 'Independent certifier'].includes(item))) throw new Error('Recipient policy needs a nonempty set of known recipients.')
+  const priorScopes = Object.fromEntries((Object.keys(defaultRecipientContentScope) as CloseoutRecipient[]).map((recipient) => [recipient, [...currentRecipientContentScope(state, command.projectId, recipient)]])) as Record<CloseoutRecipient, CloseoutContentScope[]>
+  const scopes = { ...priorScopes, ...command.scopeByRecipient }
+  if (required.some((recipient) => !scopes[recipient].length || new Set(scopes[recipient]).size !== scopes[recipient].length || scopes[recipient].some((scope) => !closeoutContentScopes.includes(scope)))) throw new Error('Each required recipient needs a nonempty set of known closeout content scopes.')
+  if (required.length === prior.length && required.every((item) => prior.includes(item)) && required.every((recipient) => JSON.stringify([...scopes[recipient]].sort()) === JSON.stringify([...priorScopes[recipient]].sort()))) throw new Error('Recipient policy needs a distinct recipient or content scope change.')
+  for (const recipient of required) {
+    const acknowledgement = state.recipientResponses.some((response) => response.packageId === pkg.id && response.recipient === recipient && response.decision === 'acknowledged') || state.recipientPolicies.some((policy) => policy.currentPackageId === pkg.id && policy.recipient === recipient && policy.decision === 'retain acknowledgement')
+    if (acknowledgement && scopes[recipient].some((scope) => !priorScopes[recipient].includes(scope) && packageContentPresent(pkg, scope))) throw new Error(`Existing ${recipient} acknowledgement cannot silently cover newly required content; issue a new package revision.`)
+  }
   if (command.reason.trim().length < 20 || !command.approvedBy.trim() || command.effectiveOn < pkg.assembledOn) throw new Error('Policy reason, approving authority, and effective date after package assembly are required.')
   const next = structuredClone(state)
-  next.recipientPolicyRevisions.push({ id: command.id, projectId: command.projectId, packageId: pkg.id, revision: (state.recipientPolicyRevisions.at(-1)?.revision ?? 0) + 1, requiredRecipients: [...required], introduced: required.filter((item) => !prior.includes(item)), retired: prior.filter((item) => !required.includes(item)), reason: command.reason.trim(), approvedBy: command.approvedBy.trim(), effectiveOn: command.effectiveOn, immutable: true })
+  next.recipientPolicyRevisions.push({ id: command.id, projectId: command.projectId, packageId: pkg.id, revision: (state.recipientPolicyRevisions.filter((item) => item.projectId === command.projectId).at(-1)?.revision ?? 0) + 1, requiredRecipients: [...required], scopeByRecipient: Object.fromEntries(required.map((recipient) => [recipient, [...scopes[recipient]]])), introduced: required.filter((item) => !prior.includes(item)), retired: prior.filter((item) => !required.includes(item)), reason: command.reason.trim(), approvedBy: command.approvedBy.trim(), effectiveOn: command.effectiveOn, immutable: true })
   next.revision += 1
   return next
 }
 
-export function recipientPackageChanges(previous: CloseoutEvidencePackage, current: CloseoutEvidencePackage, recipient: CloseoutRecipient) {
+function packageContentPresent(pkg: CloseoutEvidencePackage, scope: CloseoutContentScope) {
+  return scope === 'final account' ? Boolean(pkg.accountId) : scope === 'commercial adjustments' ? pkg.acceptedAdjustmentIds.length > 0 : scope === 'closeout documents' ? pkg.openDocumentCount > 0 || pkg.custodyIds.length > 0 : scope === 'waivers' ? pkg.waiverIds.length > 0 : scope === 'custody evidence' ? pkg.custodyIds.length > 0 : Boolean(pkg.closureId)
+}
+
+export function changedCloseoutContent(previous: CloseoutEvidencePackage, current: CloseoutEvidencePackage): CloseoutContentScope[] {
+  const changed: CloseoutContentScope[] = []
+  if (previous.accountId !== current.accountId || previous.accountRevision !== current.accountRevision) changed.push('final account')
+  if (JSON.stringify(previous.acceptedAdjustmentIds) !== JSON.stringify(current.acceptedAdjustmentIds)) changed.push('commercial adjustments')
+  if (previous.openDocumentCount !== current.openDocumentCount) changed.push('closeout documents')
+  if (JSON.stringify(previous.custodyIds) !== JSON.stringify(current.custodyIds)) changed.push('custody evidence')
+  if (JSON.stringify(previous.waiverIds) !== JSON.stringify(current.waiverIds)) changed.push('waivers')
+  if (previous.closureId !== current.closureId) changed.push('final closure evidence')
+  return changed
+}
+
+export function recipientPackageChanges(previous: CloseoutEvidencePackage, current: CloseoutEvidencePackage, recipient: CloseoutRecipient, scopes: readonly CloseoutContentScope[] = defaultRecipientContentScope[recipient]) {
+  const material = changedCloseoutContent(previous, current).filter((scope) => scopes.includes(scope))
   const changed: string[] = []
-  if (previous.accountId !== current.accountId || previous.accountRevision !== current.accountRevision || JSON.stringify(previous.acceptedAdjustmentIds) !== JSON.stringify(current.acceptedAdjustmentIds)) changed.push('commercial scope')
-  if (recipient !== 'Commercial manager' && (JSON.stringify(previous.custodyIds) !== JSON.stringify(current.custodyIds) || previous.closureId !== current.closureId)) changed.push('document custody')
-  if (recipient !== 'Main contractor' && JSON.stringify(previous.waiverIds) !== JSON.stringify(current.waiverIds)) changed.push('waiver policy')
+  if (material.includes('final account') || material.includes('commercial adjustments')) changed.push('commercial scope')
+  if (material.includes('closeout documents') || material.includes('custody evidence') || material.includes('final closure evidence')) changed.push('document custody')
+  if (material.includes('waivers')) changed.push('waiver policy')
   return changed
 }
 
@@ -120,11 +156,12 @@ export function reviewRecipientPackageSupersession(state: CloseoutPortfolioState
   if (state.recipientPolicies.some((item) => item.currentPackageId === current.id && item.recipient === command.recipient)) throw new Error('Recipient policy was already decided for this package.')
   const priorResponse = priorAcknowledgement(state, previous.id, command.recipient)
   if (!priorResponse) throw new Error('An acknowledged prior recipient obligation is required for supersession review.')
-  const changedScope = recipientPackageChanges(previous, current, command.recipient)
+  const contentScopes = currentRecipientContentScope(state, command.projectId, command.recipient)
+  const changedScope = recipientPackageChanges(previous, current, command.recipient, contentScopes)
   if (command.decision === 'retain acknowledgement' && changedScope.length > 0) throw new Error(`Changed ${changedScope.join(' and ')} requires a new recipient acknowledgement.`)
   if (command.rationale.trim().length < 15 || !command.authorizedBy.trim()) throw new Error('A specific policy rationale and authorizing operator are required.')
   const next = structuredClone(state)
-  next.recipientPolicies.push({ id: command.id, projectId: command.projectId, recipient: command.recipient, previousPackageId: previous.id, currentPackageId: current.id, previousResponseId: priorResponse.id, changedScope, decision: command.decision, rationale: command.rationale.trim(), authorizedBy: command.authorizedBy.trim(), authorizedOn: command.authorizedOn, immutable: true })
+  next.recipientPolicies.push({ id: command.id, projectId: command.projectId, recipient: command.recipient, previousPackageId: previous.id, currentPackageId: current.id, previousResponseId: priorResponse.id, changedScope, contentScopes: [...contentScopes], recipientPolicyRevision: state.recipientPolicyRevisions.filter((item) => item.projectId === command.projectId).at(-1)?.revision ?? 0, decision: command.decision, rationale: command.rationale.trim(), authorizedBy: command.authorizedBy.trim(), authorizedOn: command.authorizedOn, immutable: true })
   next.revision += 1
   return next
 }
@@ -199,7 +236,7 @@ export function recordCloseoutRecipientResponse(state: CloseoutPortfolioState, c
 export function getCloseoutHandoffStatus(state: CloseoutPortfolioState, projectId: string, asOf?: string) {
   const pkg = state.evidencePackages.filter((item) => item.projectId === projectId && item.status === 'final').at(-1) ?? null
   const previous = state.evidencePackages.filter((item) => item.projectId === projectId && item.status === 'final').at(-2) ?? null
-  const recipients = currentRequiredRecipients(state, projectId).map((recipient) => { const handoff = state.handoffs.filter((item) => item.packageId === pkg?.id && item.recipient === recipient).at(-1) ?? null; const response = state.recipientResponses.find((item) => item.handoffId === handoff?.id) ?? null; const policy = state.recipientPolicies.find((item) => item.currentPackageId === pkg?.id && item.recipient === recipient) ?? null; const priorResponse = previous ? priorAcknowledgement(state, previous.id, recipient) : null; return { recipient, handoff, response, policy, changedScope: previous && pkg ? recipientPackageChanges(previous, pkg, recipient) : [], status: !handoff ? policy?.decision === 'retain acknowledgement' ? 'acknowledged' as const : previous && priorResponse && !policy ? 'policy review required' as const : 'not prepared' as const : !response ? asOf && handoff.dueOn && asOf > handoff.dueOn ? 'overdue' as const : 'awaiting manual receipt' as const : response.decision } })
+  const recipients = currentRequiredRecipients(state, projectId).map((recipient) => { const handoff = state.handoffs.filter((item) => item.packageId === pkg?.id && item.recipient === recipient).at(-1) ?? null; const response = state.recipientResponses.find((item) => item.handoffId === handoff?.id) ?? null; const policy = state.recipientPolicies.find((item) => item.currentPackageId === pkg?.id && item.recipient === recipient) ?? null; const priorResponse = previous ? priorAcknowledgement(state, previous.id, recipient) : null; const contentScopes = currentRecipientContentScope(state, projectId, recipient); return { recipient, contentScopes, handoff, response, policy, changedScope: previous && pkg ? recipientPackageChanges(previous, pkg, recipient, contentScopes) : [], status: !handoff ? policy?.decision === 'retain acknowledgement' ? 'acknowledged' as const : previous && priorResponse && !policy ? 'policy review required' as const : 'not prepared' as const : !response ? asOf && handoff.dueOn && asOf > handoff.dueOn ? 'overdue' as const : 'awaiting manual receipt' as const : response.decision } })
   return { package: pkg, recipients, complete: Boolean(pkg) && recipients.every((item) => item.status === 'acknowledged') }
 }
 
