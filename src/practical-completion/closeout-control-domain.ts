@@ -25,11 +25,12 @@ export interface CloseoutDocumentCustodyRecord { id: string; projectId: string; 
 export interface CloseoutWaiverRecord { id: string; projectId: string; closureId: string; waivedDocuments: number; authority: string; rationale: string; retainedExposureCents: number; recordedOn: string; immutable: true }
 export interface FinalAccountAdjustment { id: string; projectId: string; reason: string; category: 'variation' | 'retention' | 'claim'; valueCents: number; evidenceIds: string[]; submittedRevision: number; status: 'proposed' | 'accepted' | 'rejected' | 'superseded'; proposedBy: string; proposedOn: string; reviewedBy: string | null; reviewedOn: string | null; resultingAccountRevision: number | null; direction?: 'increase' | 'decrease'; contractor?: string; sourceCommercialItem?: string; notes?: string; proposedEffectiveRevision?: number; immutable: true }
 export interface CloseoutEvidencePackage { id: string; projectId: string; status: 'preliminary' | 'final'; sourceRevision: number; accountId: string | null; accountRevision: number; acceptedAdjustmentIds: string[]; closureId: string | null; custodyIds: string[]; waiverIds: string[]; openDocumentCount: number; assembledBy: string; assembledOn: string; immutable: true }
-export type CloseoutRecipient = 'Client representative' | 'Commercial manager' | 'Main contractor'
+export type CloseoutRecipient = 'Client representative' | 'Commercial manager' | 'Main contractor' | 'Independent certifier'
 export const requiredCloseoutRecipients: CloseoutRecipient[] = ['Client representative', 'Commercial manager', 'Main contractor']
 export interface CloseoutHandoff { id: string; projectId: string; packageId: string; packageSourceRevision: number; recipient: CloseoutRecipient; recipientIdentity?: string; dueOn?: string; previousHandoffId?: string; reassignmentReason?: string; preparedBy: string; preparedOn: string; immutable: true }
 export interface CloseoutRecipientResponse { id: string; handoffId: string; packageId: string; recipient: CloseoutRecipient; decision: 'acknowledged' | 'correction-requested'; receiptReference: string; rationale: string; recordedBy: string; recordedOn: string; immutable: true }
 export interface RecipientSubstitution { id: string; handoffId: string; replacementHandoffId: string; packageId: string; packageSourceRevision: number; originalRecipient: string; substituteRecipient: string; reason: 'responsibility changed' | 'representative replaced' | 'contact superseded'; approvalReference: string; approvedBy: string; approvedOn: string; immutable: true }
+export interface RecipientPolicyRevision { id: string; projectId: string; packageId: string; revision: number; requiredRecipients: CloseoutRecipient[]; introduced: CloseoutRecipient[]; retired: CloseoutRecipient[]; reason: string; approvedBy: string; effectiveOn: string; immutable: true }
 export interface RecipientSupersessionPolicy { id: string; projectId: string; recipient: CloseoutRecipient; previousPackageId: string; currentPackageId: string; previousResponseId: string; changedScope: string[]; decision: 'retain acknowledgement' | 'renew acknowledgement'; rationale: string; authorizedBy: string; authorizedOn: string; immutable: true }
 export interface CloseoutPortfolioState {
   revision: number
@@ -45,6 +46,7 @@ export interface CloseoutPortfolioState {
   recipientResponses: CloseoutRecipientResponse[]
   recipientSubstitutions: RecipientSubstitution[]
   recipientPolicies: RecipientSupersessionPolicy[]
+  recipientPolicyRevisions: RecipientPolicyRevision[]
 }
 export interface ScheduleCloseoutIntervention {
   id: string
@@ -71,6 +73,27 @@ export const initialCloseoutPortfolioState: CloseoutPortfolioState = {
   recipientResponses: [],
   recipientSubstitutions: [],
   recipientPolicies: [],
+  recipientPolicyRevisions: [],
+}
+
+export function currentRequiredRecipients(state: CloseoutPortfolioState, projectId: string): CloseoutRecipient[] {
+  return state.recipientPolicyRevisions.filter((item) => item.projectId === projectId).at(-1)?.requiredRecipients ?? requiredCloseoutRecipients
+}
+
+export function changeCloseoutRecipientPolicy(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; packageId: string; requiredRecipients: readonly CloseoutRecipient[]; reason: string; approvedBy: string; effectiveOn: string }) {
+  if (state.recipientPolicyRevisions.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', command.projectId, 'Closeout changed. Refresh before revising recipient policy.')
+  if (!closeoutPermissions(command.authority).canAuthorizeClosure) throw new CloseoutControlError('UNAUTHORIZED', command.projectId, 'Only the commercial director can revise recipient policy.')
+  const pkg = state.evidencePackages.filter((item) => item.projectId === command.projectId && item.status === 'final').at(-1)
+  if (pkg?.id !== command.packageId) throw new Error('Policy must apply to the current final package revision.')
+  const prior = currentRequiredRecipients(state, command.projectId)
+  const required = command.requiredRecipients
+  if (!required.length || new Set(required).size !== required.length || required.some((item) => ![...requiredCloseoutRecipients, 'Independent certifier'].includes(item)) || (required.length === prior.length && required.every((item) => prior.includes(item)))) throw new Error('Recipient policy needs a distinct nonempty set of known recipients.')
+  if (command.reason.trim().length < 20 || !command.approvedBy.trim() || command.effectiveOn < pkg.assembledOn) throw new Error('Policy reason, approving authority, and effective date after package assembly are required.')
+  const next = structuredClone(state)
+  next.recipientPolicyRevisions.push({ id: command.id, projectId: command.projectId, packageId: pkg.id, revision: (state.recipientPolicyRevisions.at(-1)?.revision ?? 0) + 1, requiredRecipients: [...required], introduced: required.filter((item) => !prior.includes(item)), retired: prior.filter((item) => !required.includes(item)), reason: command.reason.trim(), approvedBy: command.approvedBy.trim(), effectiveOn: command.effectiveOn, immutable: true })
+  next.revision += 1
+  return next
 }
 
 export function recipientPackageChanges(previous: CloseoutEvidencePackage, current: CloseoutEvidencePackage, recipient: CloseoutRecipient) {
@@ -133,7 +156,7 @@ export function prepareCloseoutHandoff(state: CloseoutPortfolioState, command: {
   if (state.recipientPolicies.some((item) => item.currentPackageId === pkg.id && item.recipient === command.recipient && item.decision === 'retain acknowledgement')) throw new Error('Recipient obligation remains satisfied under the approved unchanged-scope policy.')
   const priorPackage = state.evidencePackages.filter((item) => item.projectId === pkg.projectId && item.status === 'final').at(-2)
   if (priorPackage && priorAcknowledgement(state, priorPackage.id, command.recipient) && !state.recipientPolicies.some((item) => item.currentPackageId === pkg.id && item.recipient === command.recipient)) throw new Error('Review supersession policy before preparing a renewed recipient handoff.')
-  if (!requiredCloseoutRecipients.includes(command.recipient) || !command.preparedBy.trim()) throw new Error('A required recipient and preparing operator are needed.')
+  if (!currentRequiredRecipients(state, pkg.projectId).includes(command.recipient) || !command.preparedBy.trim()) throw new Error('A required recipient and preparing operator are needed.')
   if (state.handoffs.some((item) => item.packageId === pkg.id && item.recipient === command.recipient)) throw new Error('This recipient already has a handoff for the selected package.')
   const next = structuredClone(state)
   next.handoffs.push({ id: command.id, projectId: pkg.projectId, packageId: pkg.id, packageSourceRevision: pkg.sourceRevision, recipient: command.recipient, recipientIdentity: command.recipientIdentity?.trim() ? command.recipientIdentity.trim() : command.recipient, ...(command.dueOn ? { dueOn: command.dueOn } : {}), preparedBy: command.preparedBy.trim(), preparedOn: command.preparedOn, immutable: true })
@@ -176,7 +199,7 @@ export function recordCloseoutRecipientResponse(state: CloseoutPortfolioState, c
 export function getCloseoutHandoffStatus(state: CloseoutPortfolioState, projectId: string, asOf?: string) {
   const pkg = state.evidencePackages.filter((item) => item.projectId === projectId && item.status === 'final').at(-1) ?? null
   const previous = state.evidencePackages.filter((item) => item.projectId === projectId && item.status === 'final').at(-2) ?? null
-  const recipients = requiredCloseoutRecipients.map((recipient) => { const handoff = state.handoffs.filter((item) => item.packageId === pkg?.id && item.recipient === recipient).at(-1) ?? null; const response = state.recipientResponses.find((item) => item.handoffId === handoff?.id) ?? null; const policy = state.recipientPolicies.find((item) => item.currentPackageId === pkg?.id && item.recipient === recipient) ?? null; const priorResponse = previous ? priorAcknowledgement(state, previous.id, recipient) : null; return { recipient, handoff, response, policy, changedScope: previous && pkg ? recipientPackageChanges(previous, pkg, recipient) : [], status: !handoff ? policy?.decision === 'retain acknowledgement' ? 'acknowledged' as const : previous && priorResponse && !policy ? 'policy review required' as const : 'not prepared' as const : !response ? asOf && handoff.dueOn && asOf > handoff.dueOn ? 'overdue' as const : 'awaiting manual receipt' as const : response.decision } })
+  const recipients = currentRequiredRecipients(state, projectId).map((recipient) => { const handoff = state.handoffs.filter((item) => item.packageId === pkg?.id && item.recipient === recipient).at(-1) ?? null; const response = state.recipientResponses.find((item) => item.handoffId === handoff?.id) ?? null; const policy = state.recipientPolicies.find((item) => item.currentPackageId === pkg?.id && item.recipient === recipient) ?? null; const priorResponse = previous ? priorAcknowledgement(state, previous.id, recipient) : null; return { recipient, handoff, response, policy, changedScope: previous && pkg ? recipientPackageChanges(previous, pkg, recipient) : [], status: !handoff ? policy?.decision === 'retain acknowledgement' ? 'acknowledged' as const : previous && priorResponse && !policy ? 'policy review required' as const : 'not prepared' as const : !response ? asOf && handoff.dueOn && asOf > handoff.dueOn ? 'overdue' as const : 'awaiting manual receipt' as const : response.decision } })
   return { package: pkg, recipients, complete: Boolean(pkg) && recipients.every((item) => item.status === 'acknowledged') }
 }
 
@@ -346,16 +369,16 @@ export class BrowserCloseoutPersistence implements CloseoutPersistence {
   static key = 'buildledger:closeout-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [], handoffs: saved.handoffs ?? [], recipientResponses: saved.recipientResponses ?? [], recipientSubstitutions: saved.recipientSubstitutions ?? [], recipientPolicies: saved.recipientPolicies ?? [] } }
+  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [], handoffs: saved.handoffs ?? [], recipientResponses: saved.recipientResponses ?? [], recipientSubstitutions: saved.recipientSubstitutions ?? [], recipientPolicies: saved.recipientPolicies ?? [], recipientPolicyRevisions: saved.recipientPolicyRevisions ?? [] } }
   save(next: CloseoutPortfolioState) { this.storage.setItem(BrowserCloseoutPersistence.key, JSON.stringify(next)) }
 }
 export class CloseoutPortfolioRepository {
   private readonly persistence: CloseoutPersistence
   constructor(persistence: CloseoutPersistence) { this.persistence = persistence }
   read(): CloseoutPortfolioState { return this.persistence.load() ?? structuredClone(initialCloseoutPortfolioState) }
-  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence | Parameters<typeof prepareCloseoutHandoff>[1] | Parameters<typeof reassignCloseoutHandoff>[1] | Parameters<typeof recordCloseoutRecipientResponse>[1] | Parameters<typeof substituteCloseoutRecipient>[1] | Parameters<typeof reviewRecipientPackageSupersession>[1]) {
+  dispatch(command: ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence | Parameters<typeof prepareCloseoutHandoff>[1] | Parameters<typeof reassignCloseoutHandoff>[1] | Parameters<typeof recordCloseoutRecipientResponse>[1] | Parameters<typeof substituteCloseoutRecipient>[1] | Parameters<typeof reviewRecipientPackageSupersession>[1] | Parameters<typeof changeCloseoutRecipientPolicy>[1]) {
     const current = this.read()
-    const next = 'receiptReference' in command ? recordCloseoutRecipientResponse(current, command) : 'substituteRecipient' in command ? substituteCloseoutRecipient(current, command) : 'handoffId' in command ? reassignCloseoutHandoff(current, command) : 'packageId' in command ? prepareCloseoutHandoff(current, command) : 'recipient' in command && 'decision' in command ? reviewRecipientPackageSupersession(current, command) : 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
+    const next = 'requiredRecipients' in command ? changeCloseoutRecipientPolicy(current, command) : 'receiptReference' in command ? recordCloseoutRecipientResponse(current, command) : 'substituteRecipient' in command ? substituteCloseoutRecipient(current, command) : 'handoffId' in command ? reassignCloseoutHandoff(current, command) : 'packageId' in command ? prepareCloseoutHandoff(current, command) : 'recipient' in command && 'decision' in command ? reviewRecipientPackageSupersession(current, command) : 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
     if (next !== current) this.persistence.save(next)
     return next
   }
