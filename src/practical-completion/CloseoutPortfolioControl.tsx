@@ -8,7 +8,11 @@ import {
   currentRecipientContentScope,
   currentRequiredRecipients,
   getCloseoutHandoffStatus,
+  captureProjectCloseoutArchive,
+  parseProjectCloseoutArchive,
+  previewProjectCloseoutRestore,
   requiredCloseoutRecipients,
+  type ProjectCloseoutArchive,
   type CloseoutRecipient,
   type CloseoutContentScope,
   type PortfolioAuthority,
@@ -25,6 +29,7 @@ export function CloseoutPortfolioControl() {
   const [authority, setAuthority] =
     useState<PortfolioAuthority>("Portfolio Viewer");
   const [message, setMessage] = useState("");
+  const [archive, setArchive] = useState<ProjectCloseoutArchive | null>(() => { try { const saved = localStorage.getItem('buildledger:project-closeout-archive:v1'); return saved ? parseProjectCloseoutArchive(saved) : null; } catch { return null; } });
   const [selectedPackageId, setSelectedPackageId] = useState<string | null>(null);
   const [recipient, setRecipient] = useState<CloseoutRecipient>('Client representative');
   const [policyRecipient, setPolicyRecipient] = useState<CloseoutRecipient>('Independent certifier');
@@ -70,6 +75,11 @@ export function CloseoutPortfolioControl() {
   };
   const comparison = compareFinalAccountAdjustment(state, "PROJECT-SOUTH", Number(adjustmentDraft.amount) || 0, adjustmentDraft.direction);
   const selectedPackage = state.evidencePackages.find((item) => item.id === selectedPackageId) ?? state.evidencePackages.at(-1);
+  const finalPackage = state.evidencePackages.filter((item) => item.projectId === 'PROJECT-SOUTH' && item.status === 'final').at(-1);
+  const archivePreview = archive ? previewProjectCloseoutRestore(state, archive, 'PROJECT-SOUTH') : null;
+  const captureArchive = () => { try { const next = captureProjectCloseoutArchive(state, { id: crypto.randomUUID(), projectId: 'PROJECT-SOUTH', authority, createdOn: '2026-10-29' }); localStorage.setItem('buildledger:project-closeout-archive:v1', JSON.stringify(next)); setArchive(next); setMessage('Versioned final closeout archive captured with source revisions and recipient evidence.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Closeout archive failed.'); } queueMicrotask(() => feedback.current?.focus()); };
+  const importArchive = async (file: File | undefined) => { if (!file) return; try { setArchive(parseProjectCloseoutArchive(await file.text())); setMessage('Closeout archive loaded for verification; project records are unchanged.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Archive import failed.'); } queueMicrotask(() => feedback.current?.focus()); };
+  const restoreArchive = () => { if (!archive) return; try { setState(repository.restore(archive, { id: crypto.randomUUID(), expectedRevision: state.revision, authority, projectId: 'PROJECT-SOUTH', restoredBy: 'commercial-director', restoredOn: '2026-10-29' })); setMessage('Verified project archive restored with immutable recovery history.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Archive restore failed.'); } queueMicrotask(() => feedback.current?.focus()); };
   const handoffStatus = getCloseoutHandoffStatus(state, 'PROJECT-SOUTH');
   const overdueHandoffStatus = getCloseoutHandoffStatus(state, 'PROJECT-SOUTH', '2026-10-28');
   const recipientHandoff = handoffStatus.recipients.find((item) => item.recipient === recipient);
@@ -137,6 +147,7 @@ export function CloseoutPortfolioControl() {
           {item.commercialManager} · source {item.sourceReference}
         </p>
       ))}
+      <section aria-label="Project closeout archive"><h3>Final closeout recovery</h3><button disabled={authority !== 'Commercial Director' || !finalPackage} onClick={captureArchive}>Capture final closeout archive</button><label>Import closeout archive<input type="file" accept="application/json,.json" onChange={(event) => { void importArchive(event.target.files?.[0]); }} /></label>{archive && <><p aria-label="Closeout archive preview">Archive {archive.id} · project {archive.projectId} · package {archive.currentPackageId} · account revision {String(archive.accountRevision)} · source revision {String(archive.sourceRevision)} · {archivePreview?.ready ? 'verified for restore' : 'restore blocked'}</p>{archivePreview?.reasons.map((reason) => <p role="alert" key={reason}>{reason}</p>)}<a download={`closeout-${archive.projectId}-${archive.id}.json`} href={`data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(archive, null, 2))}`}>Download closeout archive</a><button disabled={authority !== 'Commercial Director' || !archivePreview?.ready} onClick={restoreArchive}>Restore verified project closeout</button></>}<ol aria-label="Closeout archive restoration history">{state.archiveRestores.map((item) => <li key={item.id}>{item.archiveId} · {item.projectId} · revision {String(item.sourceRevision)} · {item.restoredBy}</li>)}</ol></section>
       <button
         disabled={
           authority !== "Commercial Director" || state.interventions.length > 0

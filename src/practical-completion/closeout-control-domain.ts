@@ -55,6 +55,7 @@ export interface CloseoutPortfolioState {
   recipientSubstitutions: RecipientSubstitution[]
   recipientPolicies: RecipientSupersessionPolicy[]
   recipientPolicyRevisions: RecipientPolicyRevision[]
+  archiveRestores: { id: string; archiveId: string; projectId: string; sourceRevision: number; restoredBy: string; restoredOn: string; immutable: true }[]
 }
 export interface ScheduleCloseoutIntervention {
   id: string
@@ -82,6 +83,7 @@ export const initialCloseoutPortfolioState: CloseoutPortfolioState = {
   recipientSubstitutions: [],
   recipientPolicies: [],
   recipientPolicyRevisions: [],
+  archiveRestores: [],
 }
 
 export function currentRequiredRecipients(state: CloseoutPortfolioState, projectId: string): CloseoutRecipient[] {
@@ -401,12 +403,102 @@ export function queryProjectCloseoutHistory(state: CloseoutPortfolioState, proje
   ].sort((a, b) => a.occurredOn.localeCompare(b.occurredOn))
 }
 
+export interface ProjectCloseoutArchive {
+  schemaVersion: 1
+  id: string
+  projectId: string
+  sourceRevision: number
+  createdOn: string
+  currentPackageId: string
+  accountRevision: number
+  project: ProjectCloseoutRecord
+  interventions: CloseoutIntervention[]
+  closures: ProjectClosure[]
+  finalAccounts: FinalAccountRecord[]
+  documentCustody: CloseoutDocumentCustodyRecord[]
+  waivers: CloseoutWaiverRecord[]
+  adjustments: FinalAccountAdjustment[]
+  evidencePackages: CloseoutEvidencePackage[]
+  handoffs: CloseoutHandoff[]
+  recipientResponses: CloseoutRecipientResponse[]
+  recipientSubstitutions: RecipientSubstitution[]
+  recipientPolicies: RecipientSupersessionPolicy[]
+  recipientPolicyRevisions: RecipientPolicyRevision[]
+}
+
+export function captureProjectCloseoutArchive(state: CloseoutPortfolioState, command: { id: string; projectId: string; authority: PortfolioAuthority; createdOn: string }): ProjectCloseoutArchive {
+  if (command.authority !== 'Commercial Director') throw new CloseoutControlError('UNAUTHORIZED', command.projectId, 'Only the commercial director can archive final closeout.')
+  const project = state.projects.find((item) => item.projectId === command.projectId)
+  const pkg = state.evidencePackages.filter((item) => item.projectId === command.projectId && item.status === 'final').at(-1)
+  if (!project || !pkg || !command.id.trim() || !/^20\d{2}-\d{2}-\d{2}$/.test(command.createdOn)) throw new Error('Final closeout package, archive identity, and business date are required.')
+  const handoffs = state.handoffs.filter((item) => item.projectId === command.projectId)
+  const handoffIds = new Set(handoffs.map((item) => item.id))
+  return structuredClone({ schemaVersion: 1, id: command.id.trim(), projectId: command.projectId, sourceRevision: state.revision, createdOn: command.createdOn, currentPackageId: pkg.id, accountRevision: pkg.accountRevision, project, interventions: state.interventions.filter((item) => item.projectId === command.projectId), closures: state.closures.filter((item) => item.projectId === command.projectId), finalAccounts: state.finalAccounts.filter((item) => item.projectId === command.projectId), documentCustody: state.documentCustody.filter((item) => item.projectId === command.projectId), waivers: state.waivers.filter((item) => item.projectId === command.projectId), adjustments: state.adjustments.filter((item) => item.projectId === command.projectId), evidencePackages: state.evidencePackages.filter((item) => item.projectId === command.projectId), handoffs, recipientResponses: state.recipientResponses.filter((item) => handoffIds.has(item.handoffId)), recipientSubstitutions: state.recipientSubstitutions.filter((item) => handoffIds.has(item.handoffId)), recipientPolicies: state.recipientPolicies.filter((item) => item.projectId === command.projectId), recipientPolicyRevisions: state.recipientPolicyRevisions.filter((item) => item.projectId === command.projectId) })
+}
+
+export function parseProjectCloseoutArchive(raw: string): ProjectCloseoutArchive {
+  const parsed: unknown = JSON.parse(raw)
+  if (!parsed || typeof parsed !== 'object') throw new Error('Closeout archive is invalid.')
+  const value = parsed as Record<string, unknown>
+  if (value['schemaVersion'] !== 1) throw new Error('Unsupported closeout archive schema.')
+  if (typeof value['id'] !== 'string' || typeof value['projectId'] !== 'string' || !Number.isSafeInteger(value['sourceRevision']) || typeof value['currentPackageId'] !== 'string' || !value['project'] || typeof value['project'] !== 'object') throw new Error('Closeout archive identity is invalid.')
+  if ((value['project'] as Record<string, unknown>)['projectId'] !== value['projectId']) throw new Error('Closeout archive project identity is invalid.')
+  for (const key of ['interventions', 'closures', 'finalAccounts', 'documentCustody', 'waivers', 'adjustments', 'evidencePackages', 'handoffs', 'recipientResponses', 'recipientSubstitutions', 'recipientPolicies', 'recipientPolicyRevisions']) if (!Array.isArray(value[key]) || !(value[key] as unknown[]).every((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>)['id'] === 'string')) throw new Error(`Closeout archive ${key} is invalid.`)
+  return value as unknown as ProjectCloseoutArchive
+}
+
+export function previewProjectCloseoutRestore(state: CloseoutPortfolioState, archive: ProjectCloseoutArchive, projectId: string) {
+  const reasons: string[] = []
+  const project = state.projects.find((item) => item.projectId === projectId)
+  if (archive.projectId !== projectId || project?.contractor !== archive.project.contractor) reasons.push('Archive project or contractor identity does not match.')
+  if (archive.sourceRevision !== state.revision) reasons.push('Project changed after archive capture; newer work cannot be overwritten.')
+  const pkg = archive.evidencePackages.find((item) => item.id === archive.currentPackageId && item.status === 'final')
+  if (!pkg) reasons.push('Final package, account revision, or closure source is missing.')
+  else if (pkg.accountRevision !== archive.accountRevision || !archive.finalAccounts.some((item) => item.id === pkg.accountId && item.revision === pkg.accountRevision) || !archive.closures.some((item) => item.id === pkg.closureId)) reasons.push('Final package, account revision, or closure source is missing.')
+  if (pkg && (pkg.custodyIds.some((id) => !archive.documentCustody.some((item) => item.id === id)) || pkg.waiverIds.some((id) => !archive.waivers.some((item) => item.id === id)) || pkg.acceptedAdjustmentIds.some((id) => !archive.adjustments.some((item) => item.id === id && item.status === 'accepted')))) reasons.push('Package custody, waiver, or adjustment references are incomplete.')
+  if (archive.recipientResponses.some((item) => !archive.handoffs.some((handoff) => handoff.id === item.handoffId && handoff.packageId === item.packageId)) || archive.handoffs.some((item) => !archive.evidencePackages.some((entry) => entry.id === item.packageId))) reasons.push('Recipient handoff or acknowledgement lineage is incomplete.')
+  if ([...archive.interventions, ...archive.closures, ...archive.finalAccounts, ...archive.documentCustody, ...archive.waivers, ...archive.adjustments, ...archive.evidencePackages, ...archive.handoffs, ...archive.recipientPolicies, ...archive.recipientPolicyRevisions].some((item) => item.projectId !== projectId)) reasons.push('Archived evidence belongs to another project.')
+  const histories = [[archive.interventions, state.interventions], [archive.closures, state.closures], [archive.finalAccounts, state.finalAccounts], [archive.documentCustody, state.documentCustody], [archive.waivers, state.waivers], [archive.adjustments, state.adjustments], [archive.evidencePackages, state.evidencePackages], [archive.handoffs, state.handoffs], [archive.recipientResponses, state.recipientResponses], [archive.recipientSubstitutions, state.recipientSubstitutions], [archive.recipientPolicies, state.recipientPolicies], [archive.recipientPolicyRevisions, state.recipientPolicyRevisions]] as const
+  for (const [archived, current] of histories) for (const item of archived) {
+    const existing = current.find((entry) => entry.id === item.id)
+    if (existing && JSON.stringify(existing) !== JSON.stringify(item)) reasons.push(`Historical closeout record ${item.id} conflicts with its archive.`)
+  }
+  return { ready: reasons.length === 0, reasons, archiveId: archive.id, sourceRevision: archive.sourceRevision, currentRevision: state.revision }
+}
+
+export function restoreProjectCloseoutArchive(state: CloseoutPortfolioState, archive: ProjectCloseoutArchive, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; restoredBy: string; restoredOn: string }) {
+  if (command.authority !== 'Commercial Director') throw new CloseoutControlError('UNAUTHORIZED', command.projectId, 'Only the commercial director can restore closeout evidence.')
+  if (state.archiveRestores.some((item) => item.archiveId === archive.id)) return state
+  if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', command.projectId, 'Closeout changed before archive restore.')
+  const preview = previewProjectCloseoutRestore(state, archive, command.projectId)
+  if (!preview.ready || !command.id.trim() || !command.restoredBy.trim()) throw new Error(preview.reasons.join(' ') || 'Restore identity and actor are required.')
+  const next = structuredClone(state)
+  const projectIndex = next.projects.findIndex((item) => item.projectId === command.projectId)
+  next.projects[projectIndex] = structuredClone(archive.project)
+  const merge = <T extends { id: string }>(current: T[], saved: T[]) => [...current, ...structuredClone(saved).filter((item) => !current.some((existing) => existing.id === item.id))]
+  next.interventions = merge(next.interventions, archive.interventions)
+  next.closures = merge(next.closures, archive.closures)
+  next.finalAccounts = merge(next.finalAccounts, archive.finalAccounts)
+  next.documentCustody = merge(next.documentCustody, archive.documentCustody)
+  next.waivers = merge(next.waivers, archive.waivers)
+  next.adjustments = merge(next.adjustments, archive.adjustments)
+  next.evidencePackages = merge(next.evidencePackages, archive.evidencePackages)
+  next.handoffs = merge(next.handoffs, archive.handoffs)
+  next.recipientResponses = merge(next.recipientResponses, archive.recipientResponses)
+  next.recipientSubstitutions = merge(next.recipientSubstitutions, archive.recipientSubstitutions)
+  next.recipientPolicies = merge(next.recipientPolicies, archive.recipientPolicies)
+  next.recipientPolicyRevisions = merge(next.recipientPolicyRevisions, archive.recipientPolicyRevisions)
+  next.archiveRestores.push({ id: command.id, archiveId: archive.id, projectId: command.projectId, sourceRevision: archive.sourceRevision, restoredBy: command.restoredBy.trim(), restoredOn: command.restoredOn, immutable: true })
+  next.revision += 1
+  return next
+}
+
 export interface CloseoutPersistence { load(): CloseoutPortfolioState | null; save(next: CloseoutPortfolioState): void }
 export class BrowserCloseoutPersistence implements CloseoutPersistence {
   static key = 'buildledger:closeout-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [], handoffs: saved.handoffs ?? [], recipientResponses: saved.recipientResponses ?? [], recipientSubstitutions: saved.recipientSubstitutions ?? [], recipientPolicies: saved.recipientPolicies ?? [], recipientPolicyRevisions: saved.recipientPolicyRevisions ?? [] } }
+  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [], handoffs: saved.handoffs ?? [], recipientResponses: saved.recipientResponses ?? [], recipientSubstitutions: saved.recipientSubstitutions ?? [], recipientPolicies: saved.recipientPolicies ?? [], recipientPolicyRevisions: saved.recipientPolicyRevisions ?? [], archiveRestores: saved.archiveRestores ?? [] } }
   save(next: CloseoutPortfolioState) { this.storage.setItem(BrowserCloseoutPersistence.key, JSON.stringify(next)) }
 }
 export class CloseoutPortfolioRepository {
@@ -419,4 +511,5 @@ export class CloseoutPortfolioRepository {
     if (next !== current) this.persistence.save(next)
     return next
   }
+  restore(archive: ProjectCloseoutArchive, command: Parameters<typeof restoreProjectCloseoutArchive>[2]) { const current = this.read(); const next = restoreProjectCloseoutArchive(current, archive, command); if (next !== current) this.persistence.save(next); return next }
 }
