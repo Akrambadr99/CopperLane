@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assembleCloseoutEvidencePackage, authorizeProjectClosure, BrowserCloseoutPersistence, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, compareFinalAccountAdjustment, getCloseoutDocumentHistory, getCloseoutHandoffStatus, getFinalAccountAdjustmentReadiness, getFinalAccountHistory, initialCloseoutPortfolioState, prepareCloseoutHandoff, proposeCategorizedFinalAccountAdjustment, proposeFinalAccountAdjustment, queryProjectCloseoutHistory, reassignCloseoutHandoff, recordCloseoutRecipientResponse, requiredCloseoutRecipients, reviewFinalAccountAdjustment, scheduleCloseoutIntervention, substituteCloseoutRecipient, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
+import { assembleCloseoutEvidencePackage, authorizeProjectClosure, BrowserCloseoutPersistence, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, compareFinalAccountAdjustment, getCloseoutDocumentHistory, getCloseoutHandoffStatus, getFinalAccountAdjustmentReadiness, getFinalAccountHistory, initialCloseoutPortfolioState, prepareCloseoutHandoff, proposeCategorizedFinalAccountAdjustment, proposeFinalAccountAdjustment, queryProjectCloseoutHistory, reassignCloseoutHandoff, recipientPackageChanges, recordCloseoutRecipientResponse, requiredCloseoutRecipients, reviewRecipientPackageSupersession, reviewFinalAccountAdjustment, scheduleCloseoutIntervention, substituteCloseoutRecipient, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
 
 it('pins preliminary closeout evidence and requires actual closure before a final package', () => { const command = { id: 'package-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', status: 'preliminary' as const, assembledBy: 'director', assembledOn: '2026-10-25' }; expect(() => assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, { ...command, status: 'final' })).toThrow('completed closure'); expect(() => assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, { ...command, authority: 'Portfolio Viewer' })).toThrow('commercial director'); const first = assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, command); expect(first.evidencePackages[0]).toMatchObject({ sourceRevision: 0, accountRevision: 0, openDocumentCount: 3, immutable: true }); const later = scheduleCloseoutIntervention(first, { id: 'intervention-2', expectedRevision: 1, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }); expect(later.evidencePackages[0]).toEqual(first.evidencePackages[0]); expect(() => assembleCloseoutEvidencePackage(later, { ...command, id: 'package-stale' })).toThrow('Refresh') })
 
@@ -61,7 +61,7 @@ it('pins manual recipient responses to the final package and resets handover aft
   expect(getCloseoutHandoffStatus(state, command.projectId)).toMatchObject({ complete: false, recipients: [{ status: 'acknowledged' }, { status: 'acknowledged' }, { status: 'correction-requested' }] })
   const corrected = assembleCloseoutEvidencePackage(state, { id: 'final-2', expectedRevision: state.revision, authority: 'Commercial Director', projectId: command.projectId, status: 'final', assembledBy: 'director', assembledOn: '2026-10-28' })
   expect(() => recordCloseoutRecipientResponse(corrected, { id: 'stale-response', expectedRevision: corrected.revision, authority: 'Commercial Director', handoffId: 'handoff-0', packageId: 'final-1', recipient: 'Client representative', decision: 'acknowledged', receiptReference: 'LATE', rationale: '', recordedBy: 'director', recordedOn: '2026-10-29' })).toThrow('newer final package')
-  expect(getCloseoutHandoffStatus(corrected, command.projectId)).toMatchObject({ complete: false, recipients: [{ status: 'not prepared' }, { status: 'not prepared' }, { status: 'not prepared' }] })
+  expect(getCloseoutHandoffStatus(corrected, command.projectId)).toMatchObject({ complete: false, recipients: [{ status: 'policy review required' }, { status: 'policy review required' }, { status: 'not prepared' }] })
   expect(corrected.recipientResponses).toEqual(state.recipientResponses)
   const old = { ...state } as Record<string, unknown>; delete old['handoffs']; delete old['recipientResponses']
   const storage = { getItem: () => JSON.stringify(old), setItem: () => undefined }
@@ -69,6 +69,31 @@ it('pins manual recipient responses to the final package and resets handover aft
 })
 
 describe('closeout portfolio intervention', () => {
+  it('requires explicit recipient policy after supersession and never transfers changed-scope receipt', () => {
+    const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+    const closed = authorizeProjectClosure(active, { id: 'closure-policy', expectedRevision: active.revision, authority: 'Commercial Director', projectId: command.projectId, evidenceIds: ['DOC-1', 'DOC-2'], satisfiedDocuments: 2, waivedDocuments: 1, waiverAuthority: 'Commercial Director', waiverRationale: 'Minor training record accepted with retained commercial exposure.', waivedExposureCents: 40_000, finalAccountReference: 'FA-FINAL', custodyReference: 'CUSTODY-1', authorizedBy: 'director-closeout', closedOn: '2026-10-24' })
+    const first = assembleCloseoutEvidencePackage(closed, { id: 'policy-package-1', expectedRevision: closed.revision, authority: 'Commercial Director', projectId: command.projectId, status: 'final', assembledBy: 'director', assembledOn: '2026-10-25' })
+    const handed = prepareCloseoutHandoff(first, { id: 'policy-handoff-1', expectedRevision: first.revision, authority: 'Commercial Director', packageId: 'policy-package-1', recipient: 'Client representative', preparedBy: 'director', preparedOn: '2026-10-26' })
+    const acknowledged = recordCloseoutRecipientResponse(handed, { id: 'policy-receipt-1', expectedRevision: handed.revision, authority: 'Commercial Director', handoffId: 'policy-handoff-1', packageId: 'policy-package-1', recipient: 'Client representative', decision: 'acknowledged', receiptReference: 'CLIENT-RECEIPT-1', rationale: '', recordedBy: 'director', recordedOn: '2026-10-27' })
+    const second = assembleCloseoutEvidencePackage(acknowledged, { id: 'policy-package-2', expectedRevision: acknowledged.revision, authority: 'Commercial Director', projectId: command.projectId, status: 'final', assembledBy: 'director', assembledOn: '2026-10-28' })
+    const policy = { id: 'policy-decision-1', expectedRevision: second.revision, authority: 'Commercial Director' as const, projectId: command.projectId, recipient: 'Client representative' as const, decision: 'retain acknowledgement' as const, rationale: 'The final content and client obligations are unchanged.', authorizedBy: 'director', authorizedOn: '2026-10-28' }
+    expect(getCloseoutHandoffStatus(second, command.projectId).recipients[0]?.status).toBe('policy review required')
+    expect(() => prepareCloseoutHandoff(second, { id: 'premature', expectedRevision: second.revision, authority: 'Commercial Director', packageId: 'policy-package-2', recipient: 'Client representative', preparedBy: 'director', preparedOn: '2026-10-28' })).toThrow('Review supersession policy')
+    const retained = reviewRecipientPackageSupersession(second, policy)
+    expect(getCloseoutHandoffStatus(retained, command.projectId).recipients[0]).toMatchObject({ status: 'acknowledged', policy: { previousResponseId: 'policy-receipt-1', decision: 'retain acknowledgement' } })
+    expect(retained.recipientResponses).toEqual(second.recipientResponses)
+    const changed = structuredClone(second)
+    changed.evidencePackages[1]!.accountRevision += 1
+    expect(recipientPackageChanges(changed.evidencePackages[0]!, changed.evidencePackages[1]!, 'Client representative')).toContain('commercial scope')
+    expect(() => reviewRecipientPackageSupersession(changed, policy)).toThrow('requires a new recipient acknowledgement')
+    const renewed = reviewRecipientPackageSupersession(changed, { ...policy, decision: 'renew acknowledgement' })
+    expect(getCloseoutHandoffStatus(renewed, command.projectId).recipients[0]?.status).toBe('not prepared')
+    expect(renewed.recipientPolicies[0]).toMatchObject({ changedScope: ['commercial scope'], decision: 'renew acknowledgement' })
+    const documentChange = structuredClone(second.evidencePackages[1]!)
+    documentChange.custodyIds.push('CUSTODY-REVISED')
+    expect(recipientPackageChanges(second.evidencePackages[0]!, documentChange, 'Client representative')).toContain('document custody')
+    expect(recipientPackageChanges(second.evidencePackages[0]!, documentChange, 'Commercial manager')).not.toContain('document custody')
+  })
   it('transfers responsibility and preserves immutable obligation lineage', () => {
     const next = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
     expect(next.projects.find((item) => item.projectId === 'PROJECT-SOUTH')?.commercialManager).toBe('director-closeout')
