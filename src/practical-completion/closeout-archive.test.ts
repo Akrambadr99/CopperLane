@@ -37,3 +37,30 @@ it('loads older closeout state without archive history', () => {
   const persisted = new BrowserCloseoutPersistence({ getItem: () => JSON.stringify(old), setItem: () => undefined }).load()
   expect(persisted?.archiveRestores).toEqual([])
 })
+
+it('rejects duplicate recovered custody evidence before it can inflate the closeout ledger', () => {
+  const state = finalCloseout()
+  const archive = captureProjectCloseoutArchive(state, { id: 'archive-duplicate', projectId: 'PROJECT-SOUTH', authority: 'Commercial Director', createdOn: '2026-10-29' })
+  archive.documentCustody.push(structuredClone(archive.documentCustody[0]!))
+  const damaged = structuredClone(state)
+  damaged.documentCustody = []
+  const before = structuredClone(damaged)
+  expect(previewProjectCloseoutRestore(damaged, archive, 'PROJECT-SOUTH').ready).toBe(false)
+  expect(() => restoreProjectCloseoutArchive(damaged, archive, { id: 'restore-duplicate', expectedRevision: damaged.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', restoredBy: 'director', restoredOn: '2026-10-29' })).toThrow('repeats an evidence identity')
+  expect(damaged).toEqual(before)
+  archive.documentCustody.pop()
+  expect(restoreProjectCloseoutArchive(damaged, archive, { id: 'restore-valid', expectedRevision: damaged.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', restoredBy: 'director', restoredOn: '2026-10-29' }).documentCustody).toEqual(state.documentCustody)
+})
+
+it('does not recover a receipt for a different recipient on the same package', () => {
+  const state = finalCloseout()
+  const archive = captureProjectCloseoutArchive(state, { id: 'archive-recipient', projectId: 'PROJECT-SOUTH', authority: 'Commercial Director', createdOn: '2026-10-29' })
+  archive.handoffs.push({ id: 'handoff-client', projectId: 'PROJECT-SOUTH', packageId: 'final-1', packageSourceRevision: archive.evidencePackages[0]!.sourceRevision, recipient: 'Client representative', preparedBy: 'director', preparedOn: '2026-10-26', immutable: true })
+  archive.recipientResponses.push({ id: 'receipt-wrong', handoffId: 'handoff-client', packageId: 'final-1', recipient: 'Commercial manager', decision: 'acknowledged', receiptReference: 'RECEIPT-1', rationale: '', recordedBy: 'director', recordedOn: '2026-10-27', immutable: true })
+  const command = { id: 'restore-recipient', expectedRevision: state.revision, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', restoredBy: 'director', restoredOn: '2026-10-29' }
+  const before = structuredClone(state)
+  expect(() => restoreProjectCloseoutArchive(state, archive, command)).toThrow('assigned handoff recipient')
+  expect(state).toEqual(before)
+  archive.recipientResponses[0]!.recipient = 'Client representative'
+  expect(restoreProjectCloseoutArchive(state, archive, command).recipientResponses).toEqual(archive.recipientResponses)
+})
