@@ -1,3 +1,4 @@
+import { reviewCloseoutDocument } from '../document-control/closeout-documents'
 import { expect, it } from 'vitest'
 import { assembleCloseoutEvidencePackage, authorizeProjectClosure, BrowserCloseoutPersistence, captureProjectCloseoutArchive, initialCloseoutPortfolioState, parseProjectCloseoutArchive, previewProjectCloseoutRestore, restoreProjectCloseoutArchive, scheduleCloseoutIntervention } from './closeout-control-domain'
 
@@ -71,8 +72,12 @@ function revisionCommand(state: CloseoutPortfolioState, index = 0) {
   const prior = state.documentRevisions?.filter((item) => item.custodyId === custody.id).at(-1)
   return { id: `document-${String(index)}-${String((prior?.revision ?? 0) + 1)}`, expectedRevision: state.revision, authority: 'Commercial Director' as const, projectId: custody.projectId, documentCustodyId: custody.id, expectedPreviousRevisionId: prior?.id ?? null, revisionLabel: prior ? 'B' : 'A', evidenceReference: `CONTROLLED-DOC-${String(index)}-${prior ? 'B' : 'A'}`, registeredBy: 'document-controller', registeredOn: '2026-10-25' }
 }
+function releaseLatestDocument(state: CloseoutPortfolioState) {
+  const revision = state.documentRevisions?.at(-1); if (!revision) throw new Error('Expected registered revision.')
+  return reviewCloseoutDocument(state, { id: 'release-' + revision.id, expectedRevision: state.revision, authority: 'Document Controller', projectId: revision.projectId, documentRevisionId: revision.id, decision: 'released', evidenceReference: 'RELEASE-EVIDENCE-' + revision.id, rationale: 'Independent technical review verifies current document contents and custody.', reviewedBy: 'technical-reviewer', reviewedOn: revision.registeredOn })
+}
 function manifestedCloseout() {
-  let state = finalCloseout(); for (let index = 0; index < state.documentCustody.length; index++) state = registerCloseoutDocumentRevision(state, revisionCommand(state, index))
+  let state = finalCloseout(); for (let index = 0; index < state.documentCustody.length; index++) { state = registerCloseoutDocumentRevision(state, revisionCommand(state, index)); state = releaseLatestDocument(state) }
   return assembleCloseoutEvidencePackage(state, { id: 'manifested-1', expectedRevision: state.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', status: 'final', assembledBy: 'director', assembledOn: '2026-10-25' })
 }
 it('pins authoritative document revisions and invalidates downstream handover after a replacement without rewriting issued evidence', () => {
@@ -81,7 +86,7 @@ it('pins authoritative document revisions and invalidates downstream handover af
   const revised = registerCloseoutDocumentRevision(original, revisionCommand(original)), snapshot = structuredClone(revised)
   expect(revised.evidencePackages).toEqual(original.evidencePackages); expect(revised.documentCustody).toEqual(original.documentCustody); expect(revised.documentRevisions?.slice(0, 2)).toEqual(original.documentRevisions); expect(getCloseoutDocumentManifestStatus(revised, pkg).current).toBe(false); expect(getCloseoutHandoffStatus(revised, 'PROJECT-SOUTH').complete).toBe(false); expect(getProjectHandoverAcceptance(revised, 'PROJECT-SOUTH').outstanding).toContain('Closeout document revisions require a new package manifest')
   expect(() => prepareCloseoutHandoff(revised, { id: 'stale-handoff', expectedRevision: revised.revision, authority: 'Commercial Director', packageId: pkg.id, recipient: 'Client representative', preparedBy: 'director', preparedOn: '2026-10-26' })).toThrow('Document revisions changed'); expect(revised).toEqual(snapshot)
-  const replacement = assembleCloseoutEvidencePackage(revised, { id: 'manifested-2', expectedRevision: revised.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', status: 'final', assembledBy: 'director', assembledOn: '2026-10-26' }), newer = replacement.evidencePackages.at(-1); if (!newer) throw new Error('Expected replacement package.')
+  const approved = releaseLatestDocument(revised), replacement = assembleCloseoutEvidencePackage(approved, { id: 'manifested-2', expectedRevision: approved.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', status: 'final', assembledBy: 'director', assembledOn: '2026-10-26' }), newer = replacement.evidencePackages.at(-1); if (!newer) throw new Error('Expected replacement package.')
   expect(getCloseoutDocumentManifestStatus(replacement, newer).current).toBe(true); expect(changedCloseoutContent(pkg, newer)).toEqual(['closeout documents']); expect(newer.documentManifest?.[0]?.revisionId).toBe(revised.documentRevisions?.at(-1)?.id)
 })
 it('requires complete verified-document coverage and chronological revision dates before issuing a manifest', () => {
@@ -130,3 +135,39 @@ it('rejects cross-project revisions and malformed manifest entries while recover
   const malformed = JSON.parse(JSON.stringify(archive)) as Record<string, unknown>; (malformed['evidencePackages'] as Record<string, unknown>[]).at(-1)!['documentManifest'] = [null]; expect(() => parseProjectCloseoutArchive(JSON.stringify(malformed))).toThrow('manifest is invalid')
   const reordered = structuredClone(state); reordered.documentRevisions?.reverse(); const command = revisionCommand(state); expect(() => registerCloseoutDocumentRevision(reordered, { ...command, id: 'revision-c', revisionLabel: 'C', evidenceReference: 'THIRD-CONTROLLED-EVIDENCE' })).not.toThrow()
 })
+it('requires independent document release, preserves a returned revision and pins corrected release into its package', () => {
+  const initial = finalCloseout(); let state = registerCloseoutDocumentRevision(initial, revisionCommand(initial));
+  const revision = state.documentRevisions!.at(-1)!;
+  const command = { id: 'returned-technical', expectedRevision: state.revision, authority: 'Document Controller', projectId: revision.projectId, documentRevisionId: revision.id, decision: 'returned' as const, evidenceReference: 'TECHNICAL-RETURN-001', rationale: 'Warranty coverage does not match the verified installed equipment.', reviewedBy: 'technical-reviewer', reviewedOn: '2026-10-26' };
+  expect(() => reviewCloseoutDocument(state, { ...command, reviewedBy: revision.registeredBy })).toThrow('Independent reviewer');
+  expect(() => reviewCloseoutDocument(state, { ...command, authority: 'Commercial Director' })).toThrow('document controller');
+  const returned = reviewCloseoutDocument(state, command); expect(returned.documentCustody).toEqual(initial.documentCustody);
+  expect(() => reviewCloseoutDocument(returned, { ...command, id: 'overwrite-review', expectedRevision: returned.revision, decision: 'released' })).toThrow('immutable');
+  expect(() => registerCloseoutDocumentRevision(returned, revisionCommand(returned))).toThrow('cannot precede');
+  state = registerCloseoutDocumentRevision(returned, { ...revisionCommand(returned), registeredOn: '2026-10-27' }); state = releaseLatestDocument(state);
+  state = registerCloseoutDocumentRevision(state, { ...revisionCommand(state, 1), registeredOn: '2026-10-27' });
+  expect(() => assembleCloseoutEvidencePackage(state, { id: 'unreviewed', expectedRevision: state.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', status: 'final', assembledBy: 'director', assembledOn: '2026-10-27' })).toThrow('independent technical release');
+  state = releaseLatestDocument(state); const packaged = assembleCloseoutEvidencePackage(state, { id: 'released-package', expectedRevision: state.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', status: 'final', assembledBy: 'director', assembledOn: '2026-10-27' });
+  expect(packaged.documentReleaseReviews?.[0]).toEqual(returned.documentReleaseReviews?.[0]); expect(packaged.evidencePackages.at(-1)?.documentManifest?.every(pin => Boolean(pin.releaseReviewId))).toBe(true); expect(packaged.documentRevisions?.slice(0, 1)).toEqual(returned.documentRevisions);
+});
+it('round-trips technical release evidence and rejects broken independent-review archive pins', () => {
+  const state = manifestedCloseout(), archive = captureProjectCloseoutArchive(state, { id: 'technical-archive', projectId: 'PROJECT-SOUTH', authority: 'Commercial Director', createdOn: '2026-10-29' });
+  expect(parseProjectCloseoutArchive(JSON.stringify(archive))).toEqual(archive);
+  const missing = structuredClone(state); missing.documentReleaseReviews = []; const restored = restoreProjectCloseoutArchive(missing, archive, { id: 'restore-technical', expectedRevision: missing.revision, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', restoredBy: 'director', restoredOn: '2026-10-29' }); expect(restored.documentReleaseReviews).toEqual(state.documentReleaseReviews);
+  const wrong = structuredClone(archive); wrong.documentReleaseReviews![0]!.reviewedBy = wrong.documentRevisions![0]!.registeredBy; expect(previewProjectCloseoutRestore(missing, wrong, 'PROJECT-SOUTH').reasons).toContain('Document technical release lineage is incomplete.');
+  const broken = structuredClone(archive); broken.documentReleaseReviews = []; expect(previewProjectCloseoutRestore(missing, broken, 'PROJECT-SOUTH').reasons).toContain('Package technical release references are incomplete.');
+  const corrupt = structuredClone(archive); corrupt.documentReleaseReviews![0]!.reviewedOn = '2026-02-30'; expect(() => parseProjectCloseoutArchive(JSON.stringify(corrupt))).toThrow('technical release history');
+});
+it('loads legacy registered documents without fabricating technical review decisions', () => {
+  const state = manifestedCloseout(); for (const revision of state.documentRevisions ?? []) delete revision.requiresReleaseReview;
+  delete state.documentReleaseReviews; for (const pkg of state.evidencePackages) for (const pin of pkg.documentManifest ?? []) delete pin.releaseReviewId;
+  const loaded = new BrowserCloseoutPersistence({ getItem: () => JSON.stringify(state), setItem: () => undefined }).load()!;
+  expect(loaded.documentReleaseReviews).toEqual([]); expect(getCloseoutDocumentManifestStatus(loaded, loaded.evidencePackages.at(-1)!).current).toBe(true);
+});
+it('preserves revision-specific technical review drafts through a failed operation and source refresh', async () => {
+  localStorage.clear(); const state = registerCloseoutDocumentRevision(finalCloseout(), { ...revisionCommand(finalCloseout()), registeredBy: 'commercial-director' }); new BrowserCloseoutPersistence(localStorage).save(state); const user = userEvent.setup(); render(createElement(CloseoutPortfolioControl));
+  await user.selectOptions(screen.getByLabelText('Portfolio authority'), 'Document Controller'); await user.type(screen.getByLabelText('Technical release evidence'), 'INDEPENDENT-REVIEW-001'); await user.type(screen.getByLabelText('Technical review rationale'), 'Independent review confirms current installed-equipment documentation.');
+  const current = new BrowserCloseoutPersistence(localStorage).load()!; const sibling = registerCloseoutDocumentRevision(current, revisionCommand(current, 1)); new BrowserCloseoutPersistence(localStorage).save(sibling);
+  await user.click(screen.getByRole('button', { name: 'Release reviewed closeout document' })); expect(screen.getByRole('status')).toHaveTextContent('Refresh before technical review'); expect(screen.getByRole('status')).toHaveFocus(); expect(screen.getByLabelText('Technical release evidence')).toHaveValue('INDEPENDENT-REVIEW-001');
+  await user.click(screen.getByRole('button', { name: 'Refresh closeout sources' })); await user.click(screen.getByText('Register a document revision', { exact: true })); await user.selectOptions(screen.getByLabelText('Closeout custody document'), sibling.documentCustody[1]!.id); expect(screen.getByLabelText('Technical review rationale')).toHaveValue(''); await user.selectOptions(screen.getByLabelText('Closeout custody document'), sibling.documentCustody[0]!.id); expect(screen.getByLabelText('Technical release evidence')).toHaveValue('INDEPENDENT-REVIEW-001'); await user.click(screen.getByRole('button', { name: 'Release reviewed closeout document' })); expect(screen.getByRole('status')).toHaveTextContent('independently released'); expect(new BrowserCloseoutPersistence(localStorage).load()?.documentReleaseReviews).toHaveLength(1); localStorage.clear();
+});

@@ -1,6 +1,8 @@
+import { closeoutDocumentRelease, reviewCloseoutDocument, validDocumentReleaseReview, type CloseoutDocumentCustodyRecord, type CloseoutDocumentRevision, type DocumentReleaseReview, type ReviewCloseoutDocument } from '../document-control/closeout-documents'
+export type { CloseoutDocumentCustodyRecord, CloseoutDocumentRevision } from '../document-control/closeout-documents'
 import { assessCloseoutPortfolio, seededCloseoutPortfolio, type ProjectCloseoutRecord } from './closeout-portfolio'
 
-export type PortfolioAuthority = 'Portfolio Viewer' | 'Commercial Director'
+export type PortfolioAuthority = 'Portfolio Viewer' | 'Commercial Director' | 'Document Controller'
 export class CloseoutControlError extends Error {
   readonly code: 'STALE_REVISION' | 'UNAUTHORIZED' | 'UNRESOLVED_OBLIGATION' | 'MISSING_EVIDENCE' | 'INVALID_WAIVER' | 'IMMUTABLE_CLOSURE'
   readonly projectId: string
@@ -21,11 +23,9 @@ export interface CloseoutIntervention {
 }
 export interface ProjectClosure { id: string; projectId: string; interventionId: string; evidenceIds: string[]; satisfiedDocuments: number; waivedDocuments: number; waiverAuthority: string | null; waiverRationale: string | null; waivedExposureCents: number; finalAccountReference: string; custodyReference: string; authorizedBy: string; closedOn: string; immutable: true }
 export interface FinalAccountRecord { id: string; projectId: string; contractor: string; revision: number; sourceReference: string; finalReference: string; commercialExposureCents: number; approvedBy: string; approvedOn: string; immutable: true }
-export interface CloseoutDocumentCustodyRecord { id: string; projectId: string; documentReference: string; custodyReference: string; status: 'verified' | 'waived'; responsibleManager: string; recordedOn: string; closureId: string; immutable: true }
-export interface CloseoutDocumentRevision { id: string; projectId: string; custodyId: string; documentReference: string; revision: number; revisionLabel: string; previousRevisionId: string | null; evidenceReference: string; registeredBy: string; registeredOn: string; immutable: true }
 export interface CloseoutWaiverRecord { id: string; projectId: string; closureId: string; waivedDocuments: number; authority: string; rationale: string; retainedExposureCents: number; recordedOn: string; immutable: true }
 export interface FinalAccountAdjustment { id: string; projectId: string; reason: string; category: 'variation' | 'retention' | 'claim'; valueCents: number; evidenceIds: string[]; submittedRevision: number; status: 'proposed' | 'accepted' | 'rejected' | 'superseded'; proposedBy: string; proposedOn: string; reviewedBy: string | null; reviewedOn: string | null; resultingAccountRevision: number | null; direction?: 'increase' | 'decrease'; contractor?: string; sourceCommercialItem?: string; notes?: string; proposedEffectiveRevision?: number; immutable: true }
-export interface CloseoutEvidencePackage { id: string; projectId: string; status: 'preliminary' | 'final'; sourceRevision: number; accountId: string | null; accountRevision: number; acceptedAdjustmentIds: string[]; closureId: string | null; custodyIds: string[]; waiverIds: string[]; openDocumentCount: number; documentManifest?: { custodyId: string; revisionId: string }[]; assembledBy: string; assembledOn: string; immutable: true }
+export interface CloseoutEvidencePackage { id: string; projectId: string; status: 'preliminary' | 'final'; sourceRevision: number; accountId: string | null; accountRevision: number; acceptedAdjustmentIds: string[]; closureId: string | null; custodyIds: string[]; waiverIds: string[]; openDocumentCount: number; documentManifest?: { custodyId: string; revisionId: string; releaseReviewId?: string }[]; assembledBy: string; assembledOn: string; immutable: true }
 export type CloseoutRecipient = 'Client representative' | 'Commercial manager' | 'Main contractor' | 'Independent certifier'
 export const requiredCloseoutRecipients: CloseoutRecipient[] = ['Client representative', 'Commercial manager', 'Main contractor']
 export type CloseoutContentScope = 'final account' | 'commercial adjustments' | 'closeout documents' | 'waivers' | 'custody evidence' | 'final closure evidence'
@@ -50,6 +50,7 @@ export interface CloseoutPortfolioState {
   finalAccounts: FinalAccountRecord[]
   documentCustody: CloseoutDocumentCustodyRecord[]
   documentRevisions?: CloseoutDocumentRevision[]
+  documentReleaseReviews?: DocumentReleaseReview[]
   waivers: CloseoutWaiverRecord[]
   adjustments: FinalAccountAdjustment[]
   evidencePackages: CloseoutEvidencePackage[]
@@ -293,11 +294,15 @@ export function assembleCloseoutEvidencePackage(state: CloseoutPortfolioState, c
   const next = structuredClone(state)
   const documents = state.documentCustody.filter((item) => item.projectId === command.projectId && item.status === 'verified')
   const registered = (state.documentRevisions ?? []).filter((item) => item.projectId === command.projectId)
+  if (registered.length > 0 && documents.some(document => !registered.some(item => item.custodyId === document.id))) throw new Error('A verified document has no registered revision. Complete the manifest before assembly.')
   const documentManifest = registered.length > 0 ? documents.map((document) => {
     const latest = registered.filter((item) => item.custodyId === document.id).toSorted((a, b) => a.revision - b.revision).at(-1)
     if (!latest) throw new Error(`Document ${document.documentReference} has no registered revision. Complete the manifest before assembly.`)
     if (!validCloseoutBusinessDate(command.assembledOn) || latest.registeredOn > command.assembledOn) throw new Error('Package assembly date must include every registered document revision.')
-    return { custodyId: document.id, revisionId: latest.id }
+    const release = closeoutDocumentRelease(state, latest)
+    if (!release.ready) throw new Error('Document '+document.documentReference+' requires independent technical release before package assembly.')
+    if (release.review && release.review.reviewedOn > command.assembledOn) throw new Error('Package assembly cannot precede technical release review.')
+    return { custodyId: document.id, revisionId: latest.id, ...(release.review ? { releaseReviewId: release.review.id } : {}) }
   }) : undefined
   next.evidencePackages.push({ id: command.id, projectId: command.projectId, status: command.status, sourceRevision: state.revision, accountId: account?.id ?? null, accountRevision: account?.revision ?? 0, acceptedAdjustmentIds: state.adjustments.filter((item) => item.projectId === command.projectId && item.status === 'accepted').map((item) => item.id), closureId: closure?.id ?? null, custodyIds: state.documentCustody.filter((item) => item.projectId === command.projectId).map((item) => item.id), waiverIds: state.waivers.filter((item) => item.projectId === command.projectId).map((item) => item.id), openDocumentCount: project.openDocuments, ...(documentManifest ? { documentManifest } : {}), assembledBy: command.assembledBy, assembledOn: command.assembledOn, immutable: true })
   next.revision += 1
@@ -463,6 +468,7 @@ export interface ProjectCloseoutArchive {
   finalAccounts: FinalAccountRecord[]
   documentCustody: CloseoutDocumentCustodyRecord[]
   documentRevisions?: CloseoutDocumentRevision[]
+  documentReleaseReviews?: DocumentReleaseReview[]
   waivers: CloseoutWaiverRecord[]
   adjustments: FinalAccountAdjustment[]
   evidencePackages: CloseoutEvidencePackage[]
@@ -481,7 +487,7 @@ export function captureProjectCloseoutArchive(state: CloseoutPortfolioState, com
   if (!project || !pkg || !command.id.trim() || !/^20\d{2}-\d{2}-\d{2}$/.test(command.createdOn)) throw new Error('Final closeout package, archive identity, and business date are required.')
   const handoffs = state.handoffs.filter((item) => item.projectId === command.projectId)
   const handoffIds = new Set(handoffs.map((item) => item.id))
-  return structuredClone({ schemaVersion: 1, id: command.id.trim(), projectId: command.projectId, sourceRevision: state.revision, createdOn: command.createdOn, currentPackageId: pkg.id, accountRevision: pkg.accountRevision, project, interventions: state.interventions.filter((item) => item.projectId === command.projectId), closures: state.closures.filter((item) => item.projectId === command.projectId), finalAccounts: state.finalAccounts.filter((item) => item.projectId === command.projectId), documentCustody: state.documentCustody.filter((item) => item.projectId === command.projectId), documentRevisions: (state.documentRevisions ?? []).filter((item) => item.projectId === command.projectId), waivers: state.waivers.filter((item) => item.projectId === command.projectId), adjustments: state.adjustments.filter((item) => item.projectId === command.projectId), evidencePackages: state.evidencePackages.filter((item) => item.projectId === command.projectId), handoffs, recipientResponses: state.recipientResponses.filter((item) => handoffIds.has(item.handoffId)), recipientSubstitutions: state.recipientSubstitutions.filter((item) => handoffIds.has(item.handoffId)), recipientPolicies: state.recipientPolicies.filter((item) => item.projectId === command.projectId), recipientPolicyRevisions: state.recipientPolicyRevisions.filter((item) => item.projectId === command.projectId), handoverAcceptances: state.handoverAcceptances.filter((item) => item.projectId === command.projectId) })
+  return structuredClone({ schemaVersion: 1, id: command.id.trim(), projectId: command.projectId, sourceRevision: state.revision, createdOn: command.createdOn, currentPackageId: pkg.id, accountRevision: pkg.accountRevision, project, interventions: state.interventions.filter((item) => item.projectId === command.projectId), closures: state.closures.filter((item) => item.projectId === command.projectId), finalAccounts: state.finalAccounts.filter((item) => item.projectId === command.projectId), documentCustody: state.documentCustody.filter((item) => item.projectId === command.projectId), documentRevisions: (state.documentRevisions ?? []).filter((item) => item.projectId === command.projectId), documentReleaseReviews: (state.documentReleaseReviews ?? []).filter(item => item.projectId === command.projectId), waivers: state.waivers.filter((item) => item.projectId === command.projectId), adjustments: state.adjustments.filter((item) => item.projectId === command.projectId), evidencePackages: state.evidencePackages.filter((item) => item.projectId === command.projectId), handoffs, recipientResponses: state.recipientResponses.filter((item) => handoffIds.has(item.handoffId)), recipientSubstitutions: state.recipientSubstitutions.filter((item) => handoffIds.has(item.handoffId)), recipientPolicies: state.recipientPolicies.filter((item) => item.projectId === command.projectId), recipientPolicyRevisions: state.recipientPolicyRevisions.filter((item) => item.projectId === command.projectId), handoverAcceptances: state.handoverAcceptances.filter((item) => item.projectId === command.projectId) })
 }
 
 function validHandoverAcceptanceShape(item: unknown): item is HandoverAcceptance {
@@ -501,6 +507,7 @@ export function parseProjectCloseoutArchive(raw: string): ProjectCloseoutArchive
   if (value['handoverAcceptances'] !== undefined && (!Array.isArray(value['handoverAcceptances']) || !(value['handoverAcceptances'] as unknown[]).every(validHandoverAcceptanceShape))) throw new Error('Closeout handover acceptance history is invalid.')
   if ((value['evidencePackages'] as unknown[]).some((item) => { const pkg = item as Record<string, unknown>; return pkg['documentManifest'] !== undefined && (!Array.isArray(pkg['documentManifest']) || !(pkg['documentManifest'] as unknown[]).every((pin) => pin && typeof pin === 'object' && typeof (pin as Record<string, unknown>)['custodyId'] === 'string' && Boolean((pin as Record<string, unknown>)['custodyId']) && typeof (pin as Record<string, unknown>)['revisionId'] === 'string' && Boolean((pin as Record<string, unknown>)['revisionId']))) })) throw new Error('Closeout package document manifest is invalid.')
   if (value['documentRevisions'] !== undefined && (!Array.isArray(value['documentRevisions']) || !(value['documentRevisions'] as unknown[]).every(validDocumentRevisionShape))) throw new Error('Closeout document revision history is invalid.')
+  if (value['documentReleaseReviews'] !== undefined && (!Array.isArray(value['documentReleaseReviews']) || !(value['documentReleaseReviews'] as unknown[]).every(validDocumentReleaseReview))) throw new Error('Closeout technical release history is invalid.')
   return value as unknown as ProjectCloseoutArchive
 }
 
@@ -541,7 +548,10 @@ export function previewProjectCloseoutRestore(state: CloseoutPortfolioState, arc
     const verified = archive.documentCustody.filter((record) => record.projectId === projectId && record.status === 'verified' && entry.custodyIds.includes(record.id))
     return entry.documentManifest.length !== verified.length || new Set(entry.documentManifest.map((pin) => pin.custodyId)).size !== verified.length || entry.documentManifest.some((pin) => !verified.some((record) => record.id === pin.custodyId) || !revisions.some((record) => record.id === pin.revisionId && record.custodyId === pin.custodyId && record.registeredOn <= entry.assembledOn))
   })) reasons.push('Package document manifest references are incomplete.')
-  const histories = [[revisions, state.documentRevisions ?? []], [archive.interventions, state.interventions], [archive.closures, state.closures], [archive.finalAccounts, state.finalAccounts], [archive.documentCustody, state.documentCustody], [archive.waivers, state.waivers], [archive.adjustments, state.adjustments], [archive.evidencePackages, state.evidencePackages], [archive.handoffs, state.handoffs], [archive.recipientResponses, state.recipientResponses], [archive.recipientSubstitutions, state.recipientSubstitutions], [archive.recipientPolicies, state.recipientPolicies], [archive.recipientPolicyRevisions, state.recipientPolicyRevisions], [archive.handoverAcceptances ?? [], state.handoverAcceptances]] as const
+  const releases = archive.documentReleaseReviews ?? []
+  if (releases.some(item => { const revision = revisions.find(record => record.id === item.revisionId); return !validDocumentReleaseReview(item) || !revision || item.projectId !== projectId || !revision.requiresReleaseReview || item.reviewedBy === revision.registeredBy || item.reviewedOn < revision.registeredOn || releases.filter(record => record.revisionId === item.revisionId).length !== 1 })) reasons.push('Document technical release lineage is incomplete.')
+  if (archive.evidencePackages.some(entry => entry.documentManifest?.some(pin => { const revision = revisions.find(item => item.id === pin.revisionId); if (!revision?.requiresReleaseReview) return pin.releaseReviewId !== undefined; const release = closeoutDocumentRelease(archive, revision); return !release.ready || release.review?.id !== pin.releaseReviewId || !release.review || release.review.reviewedOn > entry.assembledOn }))) reasons.push('Package technical release references are incomplete.')
+  const histories = [[releases, state.documentReleaseReviews ?? []], [revisions, state.documentRevisions ?? []], [archive.interventions, state.interventions], [archive.closures, state.closures], [archive.finalAccounts, state.finalAccounts], [archive.documentCustody, state.documentCustody], [archive.waivers, state.waivers], [archive.adjustments, state.adjustments], [archive.evidencePackages, state.evidencePackages], [archive.handoffs, state.handoffs], [archive.recipientResponses, state.recipientResponses], [archive.recipientSubstitutions, state.recipientSubstitutions], [archive.recipientPolicies, state.recipientPolicies], [archive.recipientPolicyRevisions, state.recipientPolicyRevisions], [archive.handoverAcceptances ?? [], state.handoverAcceptances]] as const
   if (histories.some(([archived]) => new Set(archived.map((item) => item.id)).size !== archived.length)) reasons.push('Closeout archive repeats an evidence identity. Each closure, custody record, and recipient response must appear once.')
   if (archive.recipientResponses.some((item) => !archive.handoffs.some((handoff) => handoff.id === item.handoffId && handoff.recipient === item.recipient))) reasons.push('Recipient response does not belong to the assigned handoff recipient.')
   for (const [archived, current] of histories) for (const item of archived) {
@@ -566,6 +576,7 @@ export function restoreProjectCloseoutArchive(state: CloseoutPortfolioState, arc
   next.finalAccounts = merge(next.finalAccounts, archive.finalAccounts)
   next.documentCustody = merge(next.documentCustody, archive.documentCustody)
   next.documentRevisions = merge(next.documentRevisions ?? [], archive.documentRevisions ?? [])
+  next.documentReleaseReviews = merge(next.documentReleaseReviews ?? [], archive.documentReleaseReviews ?? [])
   next.waivers = merge(next.waivers, archive.waivers)
   next.adjustments = merge(next.adjustments, archive.adjustments)
   next.evidencePackages = merge(next.evidencePackages, archive.evidencePackages)
@@ -585,16 +596,16 @@ export class BrowserCloseoutPersistence implements CloseoutPersistence {
   static key = 'buildledger:closeout-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], documentRevisions: saved.documentRevisions ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [], handoffs: saved.handoffs ?? [], recipientResponses: saved.recipientResponses ?? [], recipientSubstitutions: saved.recipientSubstitutions ?? [], recipientPolicies: saved.recipientPolicies ?? [], recipientPolicyRevisions: saved.recipientPolicyRevisions ?? [], handoverAcceptances: saved.handoverAcceptances ?? [], archiveRestores: saved.archiveRestores ?? [] } }
+  load() { const raw = this.storage.getItem(BrowserCloseoutPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<CloseoutPortfolioState>; return { ...(saved as CloseoutPortfolioState), finalAccounts: saved.finalAccounts ?? [], documentCustody: saved.documentCustody ?? [], documentRevisions: saved.documentRevisions ?? [], documentReleaseReviews: saved.documentReleaseReviews ?? [], waivers: saved.waivers ?? [], adjustments: saved.adjustments ?? [], evidencePackages: saved.evidencePackages ?? [], handoffs: saved.handoffs ?? [], recipientResponses: saved.recipientResponses ?? [], recipientSubstitutions: saved.recipientSubstitutions ?? [], recipientPolicies: saved.recipientPolicies ?? [], recipientPolicyRevisions: saved.recipientPolicyRevisions ?? [], handoverAcceptances: saved.handoverAcceptances ?? [], archiveRestores: saved.archiveRestores ?? [] } }
   save(next: CloseoutPortfolioState) { this.storage.setItem(BrowserCloseoutPersistence.key, JSON.stringify(next)) }
 }
 export class CloseoutPortfolioRepository {
   private readonly persistence: CloseoutPersistence
   constructor(persistence: CloseoutPersistence) { this.persistence = persistence }
   read(): CloseoutPortfolioState { return this.persistence.load() ?? structuredClone(initialCloseoutPortfolioState) }
-  dispatch(command: Parameters<typeof registerCloseoutDocumentRevision>[1] | ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence | Parameters<typeof prepareCloseoutHandoff>[1] | Parameters<typeof reassignCloseoutHandoff>[1] | Parameters<typeof recordCloseoutRecipientResponse>[1] | Parameters<typeof substituteCloseoutRecipient>[1] | Parameters<typeof reviewRecipientPackageSupersession>[1] | Parameters<typeof changeCloseoutRecipientPolicy>[1] | Parameters<typeof acceptProjectHandover>[1]) {
+  dispatch(command: ReviewCloseoutDocument | Parameters<typeof registerCloseoutDocumentRevision>[1] | ScheduleCloseoutIntervention | AuthorizeProjectClosure | ProposeFinalAccountAdjustment | ReviewFinalAccountAdjustment | CategorizedAdjustmentProposal | AssembleCloseoutEvidence | Parameters<typeof prepareCloseoutHandoff>[1] | Parameters<typeof reassignCloseoutHandoff>[1] | Parameters<typeof recordCloseoutRecipientResponse>[1] | Parameters<typeof substituteCloseoutRecipient>[1] | Parameters<typeof reviewRecipientPackageSupersession>[1] | Parameters<typeof changeCloseoutRecipientPolicy>[1] | Parameters<typeof acceptProjectHandover>[1]) {
     const current = this.read()
-    const next = 'documentCustodyId' in command ? registerCloseoutDocumentRevision(current, command) : 'acceptanceReference' in command ? acceptProjectHandover(current, command) : 'requiredRecipients' in command ? changeCloseoutRecipientPolicy(current, command) : 'receiptReference' in command ? recordCloseoutRecipientResponse(current, command) : 'substituteRecipient' in command ? substituteCloseoutRecipient(current, command) : 'handoffId' in command ? reassignCloseoutHandoff(current, command) : 'packageId' in command ? prepareCloseoutHandoff(current, command) : 'recipient' in command && 'decision' in command ? reviewRecipientPackageSupersession(current, command) : 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
+    const next = 'documentRevisionId' in command ? reviewCloseoutDocument(current, command) : 'documentCustodyId' in command ? registerCloseoutDocumentRevision(current, command) : 'acceptanceReference' in command ? acceptProjectHandover(current, command) : 'requiredRecipients' in command ? changeCloseoutRecipientPolicy(current, command) : 'receiptReference' in command ? recordCloseoutRecipientResponse(current, command) : 'substituteRecipient' in command ? substituteCloseoutRecipient(current, command) : 'handoffId' in command ? reassignCloseoutHandoff(current, command) : 'packageId' in command ? prepareCloseoutHandoff(current, command) : 'recipient' in command && 'decision' in command ? reviewRecipientPackageSupersession(current, command) : 'status' in command ? assembleCloseoutEvidencePackage(current, command) : 'commercialReason' in command ? proposeCategorizedFinalAccountAdjustment(current, command) : 'decision' in command ? reviewFinalAccountAdjustment(current, command) : 'category' in command ? proposeFinalAccountAdjustment(current, command) : 'satisfiedDocuments' in command ? authorizeProjectClosure(current, command) : scheduleCloseoutIntervention(current, command)
     if (next !== current) this.persistence.save(next)
     return next
   }
@@ -607,7 +618,7 @@ function validCloseoutBusinessDate(value: string) {
 function validDocumentRevisionShape(item: unknown): item is CloseoutDocumentRevision {
   if (!item || typeof item !== 'object') return false
   const value = item as Record<string, unknown>
-  return ['id', 'projectId', 'custodyId', 'documentReference', 'revisionLabel', 'evidenceReference', 'registeredBy', 'registeredOn'].every((key) => typeof value[key] === 'string' && Boolean(value[key].trim())) && Number.isSafeInteger(value['revision']) && Number(value['revision']) > 0 && (value['previousRevisionId'] === null || typeof value['previousRevisionId'] === 'string') && value['immutable'] === true && validCloseoutBusinessDate(String(value['registeredOn']))
+  return ['id', 'projectId', 'custodyId', 'documentReference', 'revisionLabel', 'evidenceReference', 'registeredBy', 'registeredOn'].every((key) => typeof value[key] === 'string' && Boolean(value[key].trim())) && Number.isSafeInteger(value['revision']) && Number(value['revision']) > 0 && (value['previousRevisionId'] === null || typeof value['previousRevisionId'] === 'string') && value['immutable'] === true && (value['requiresReleaseReview'] === undefined || value['requiresReleaseReview'] === true) && validCloseoutBusinessDate(String(value['registeredOn']))
 }
 export function registerCloseoutDocumentRevision(state: CloseoutPortfolioState, command: { id: string; expectedRevision: number; authority: PortfolioAuthority; projectId: string; documentCustodyId: string; expectedPreviousRevisionId: string | null; revisionLabel: string; evidenceReference: string; registeredBy: string; registeredOn: string }) {
   if (state.revision !== command.expectedRevision) throw new CloseoutControlError('STALE_REVISION', command.projectId, 'Closeout changed. Refresh before registering the document revision.')
@@ -619,8 +630,10 @@ export function registerCloseoutDocumentRevision(state: CloseoutPortfolioState, 
   if (!command.id.trim() || !command.registeredBy.trim() || command.revisionLabel.trim().length < 1 || command.evidenceReference.trim().length < 6 || !validCloseoutBusinessDate(command.registeredOn) || command.registeredOn < (previous?.registeredOn ?? custody.recordedOn)) throw new Error('Revision label, document evidence, operator and a valid chronological business date are required.')
   if ((state.documentRevisions ?? []).some((item) => item.id === command.id) || history.some((item) => item.revisionLabel.toLowerCase() === command.revisionLabel.trim().toLowerCase()) || previous?.evidenceReference === command.evidenceReference.trim()) throw new Error('A new revision identity, label and replacement evidence are required.')
   const next = structuredClone(state)
+  const priorReview = previous ? state.documentReleaseReviews?.find(item => item.revisionId === previous.id) : null
+  if (priorReview && command.registeredOn < priorReview.reviewedOn) throw new Error('A corrected revision cannot precede its technical review decision.')
   next.documentRevisions ??= []
-  next.documentRevisions.push({ id: command.id, projectId: command.projectId, custodyId: custody.id, documentReference: custody.documentReference, revision: (previous?.revision ?? 0) + 1, revisionLabel: command.revisionLabel.trim(), previousRevisionId: previous?.id ?? null, evidenceReference: command.evidenceReference.trim(), registeredBy: command.registeredBy.trim(), registeredOn: command.registeredOn, immutable: true })
+  next.documentRevisions.push({ id: command.id, projectId: command.projectId, custodyId: custody.id, documentReference: custody.documentReference, revision: (previous?.revision ?? 0) + 1, revisionLabel: command.revisionLabel.trim(), previousRevisionId: previous?.id ?? null, evidenceReference: command.evidenceReference.trim(), registeredBy: command.registeredBy.trim(), registeredOn: command.registeredOn, requiresReleaseReview: true, immutable: true })
   next.revision++
   return next
 }
@@ -630,7 +643,7 @@ export function getCloseoutDocumentManifestStatus(state: CloseoutPortfolioState,
   const documents = state.documentCustody.filter((item) => item.projectId === pkg.projectId && item.status === 'verified')
   const current = pkg.documentManifest?.length === documents.length && new Set(pkg.documentManifest.map((pin) => pin.custodyId)).size === documents.length && documents.every((document) => {
     const latest = registered.filter((item) => item.custodyId === document.id).toSorted((a, b) => a.revision - b.revision).at(-1)
-    return latest && pkg.documentManifest?.some((pin) => pin.custodyId === document.id && pin.revisionId === latest.id)
+    return latest && closeoutDocumentRelease(state, latest).ready && pkg.documentManifest?.some((pin) => pin.custodyId === document.id && pin.revisionId === latest.id && (!latest.requiresReleaseReview || pin.releaseReviewId === closeoutDocumentRelease(state, latest).review?.id))
   })
   return { current, status: current ? 'current document revisions' : 'document revisions changed; assemble a replacement package' }
 }
