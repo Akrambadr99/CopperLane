@@ -1,3 +1,7 @@
+import { createElement } from 'react'
+import { cleanup, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { CloseoutPortfolioControl } from './CloseoutPortfolioControl'
 import { describe, expect, it } from 'vitest'
 import { acceptProjectHandover, captureProjectCloseoutArchive, getProjectHandoverAcceptance, parseProjectCloseoutArchive, previewProjectCloseoutRestore, assembleCloseoutEvidencePackage, authorizeProjectClosure, BrowserCloseoutPersistence, changeCloseoutRecipientPolicy, changedCloseoutContent, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, compareFinalAccountAdjustment, currentRecipientContentScope, getCloseoutDocumentHistory, getCloseoutHandoffStatus, getFinalAccountAdjustmentReadiness, getFinalAccountHistory, initialCloseoutPortfolioState, prepareCloseoutHandoff, proposeCategorizedFinalAccountAdjustment, proposeFinalAccountAdjustment, queryProjectCloseoutHistory, reassignCloseoutHandoff, recipientPackageChanges, recordCloseoutRecipientResponse, requiredCloseoutRecipients, reviewRecipientPackageSupersession, reviewFinalAccountAdjustment, scheduleCloseoutIntervention, substituteCloseoutRecipient, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
 
@@ -250,4 +254,75 @@ it('archives handover evidence and loads legacy persisted closeout without inven
   expect(previewProjectCloseoutRestore(accepted, archive, command.projectId).reasons).toContain('Handover acceptance evidence lineage is incomplete.')
   const legacy = { ...state, handoverAcceptances: undefined }
   expect(new BrowserCloseoutPersistence({ getItem: () => JSON.stringify(legacy), setItem: () => undefined }).load()?.handoverAcceptances).toEqual([])
+})
+
+it('closes the selected north project without consuming another project intervention, account, or document evidence', () => {
+  const south = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+  const north = scheduleCloseoutIntervention(south, { ...command, id: 'north-intervention', expectedRevision: south.revision, projectId: 'PROJECT-NORTH' })
+  const closure = { id: 'north-closure', expectedRevision: north.revision, authority: 'Commercial Director' as const, projectId: 'PROJECT-NORTH', evidenceIds: ['NORTH-MANUAL-001', 'NORTH-WARRANTY-002'], satisfiedDocuments: 2, waivedDocuments: 0, waiverAuthority: null, waiverRationale: null, waivedExposureCents: 0, finalAccountReference: 'FA-NORTH-017-FINAL', custodyReference: 'NORTH-CUSTODY-001', authorizedBy: 'director', closedOn: '2026-10-24' }
+  const before = structuredClone(north)
+  for (const invalid of [{ satisfiedDocuments: 1.5, waivedDocuments: 0.5 }, { satisfiedDocuments: 3, waivedDocuments: -1 }, { evidenceIds: ['NORTH-MANUAL-001', 'NORTH-MANUAL-001'] }, { waivedExposureCents: 100 }]) expect(() => authorizeProjectClosure(north, { ...closure, ...invalid })).toThrow('Whole nonnegative')
+  expect(north).toEqual(before)
+  const closed = authorizeProjectClosure(north, closure)
+  expect(closed.closures[0]).toMatchObject({ projectId: 'PROJECT-NORTH', interventionId: 'north-intervention' })
+  expect(closed.finalAccounts[0]).toMatchObject({ projectId: 'PROJECT-NORTH', sourceReference: 'FA-2026-017' })
+  expect(closed.projects.find((item) => item.projectId === 'PROJECT-SOUTH')).toEqual(north.projects.find((item) => item.projectId === 'PROJECT-SOUTH'))
+  expect(closed.documentCustody.every((item) => item.projectId === 'PROJECT-NORTH')).toBe(true)
+  expect(getProjectHandoverAcceptance(closed, 'PROJECT-SOUTH').ready).toBe(false)
+})
+
+it('executes selected-project closure with preserved failed drafts and project-specific controls', async () => {
+  localStorage.clear()
+  const user = userEvent.setup()
+  render(createElement(CloseoutPortfolioControl))
+  await user.selectOptions(screen.getByLabelText('Portfolio authority'), 'Commercial Director')
+  await user.click(screen.getByRole('button', { name: 'Schedule overdue closeout intervention' }))
+  await user.clear(screen.getByLabelText('Manual receipt reference'))
+  await user.click(screen.getByLabelText('Manual receipt reference'))
+  await user.paste('SOUTH-RECEIPT-DRAFT')
+  await user.clear(screen.getByLabelText('Handover acceptance reference'))
+  await user.click(screen.getByLabelText('Handover acceptance reference'))
+  await user.paste('SOUTH-ACCEPTANCE-DRAFT')
+  await user.selectOptions(screen.getByLabelText('Operational closeout project'), 'PROJECT-NORTH')
+  expect(screen.getByLabelText('Manual receipt reference')).toHaveValue('')
+  expect(screen.getByLabelText('Handover acceptance reference')).toHaveValue('')
+  await user.click(screen.getByLabelText('Manual receipt reference'))
+  await user.paste('NORTH-RECEIPT-DRAFT')
+  await user.click(screen.getByLabelText('Handover acceptance reference'))
+  await user.paste('NORTH-ACCEPTANCE-DRAFT')
+  expect(screen.getByRole('button', { name: 'Schedule overdue closeout intervention' })).toBeEnabled()
+  expect(screen.getByLabelText('Verified document references')).toHaveValue('')
+  await user.click(screen.getByRole('button', { name: 'Schedule overdue closeout intervention' }))
+  await user.click(screen.getByLabelText('Verified document references'))
+  await user.paste('NORTH-MANUAL-001, NORTH-WARRANTY-002')
+  await user.clear(screen.getByLabelText('Satisfied documents'))
+  await user.type(screen.getByLabelText('Satisfied documents'), '1')
+  await user.click(screen.getByLabelText('Final account closure reference'))
+  await user.paste('FA-NORTH-017-FINAL')
+  await user.click(screen.getByLabelText('Document custody reference'))
+  await user.paste('NORTH-CUSTODY-001')
+  await user.click(screen.getByRole('button', { name: 'Authorize evidence-based project closure' }))
+  expect(screen.getByRole('status')).toHaveTextContent('Every open document')
+  expect(screen.getByRole('status')).toHaveFocus()
+  await user.selectOptions(screen.getByLabelText('Operational closeout project'), 'PROJECT-SOUTH')
+  expect(screen.getByLabelText('Verified document references')).toHaveValue('DOC-O&M-9, DOC-WARRANTY-3')
+  expect(screen.getByLabelText('Manual receipt reference')).toHaveValue('SOUTH-RECEIPT-DRAFT')
+  expect(screen.getByLabelText('Handover acceptance reference')).toHaveValue('SOUTH-ACCEPTANCE-DRAFT')
+  await user.selectOptions(screen.getByLabelText('Operational closeout project'), 'PROJECT-NORTH')
+  expect(screen.getByLabelText('Verified document references')).toHaveValue('NORTH-MANUAL-001, NORTH-WARRANTY-002')
+  expect(screen.getByLabelText('Manual receipt reference')).toHaveValue('NORTH-RECEIPT-DRAFT')
+  expect(screen.getByLabelText('Handover acceptance reference')).toHaveValue('NORTH-ACCEPTANCE-DRAFT')
+  await user.clear(screen.getByLabelText('Satisfied documents'))
+  await user.type(screen.getByLabelText('Satisfied documents'), '2')
+  await user.click(screen.getByRole('button', { name: 'Authorize evidence-based project closure' }))
+  expect(screen.getByRole('list', { name: 'Project closure history' })).toHaveTextContent('PROJECT-NORTH')
+  const saved = new BrowserCloseoutPersistence(localStorage).load()!
+  expect(saved.projects.find((item) => item.projectId === 'PROJECT-NORTH')?.openDocuments).toBe(0)
+  expect(saved.projects.find((item) => item.projectId === 'PROJECT-SOUTH')?.openDocuments).toBe(3)
+  cleanup()
+  render(createElement(CloseoutPortfolioControl))
+  expect(screen.getByLabelText('Operational closeout project')).toHaveValue('PROJECT-NORTH')
+  expect(screen.getByRole('list', { name: 'Project closure history' })).not.toHaveTextContent('PROJECT-SOUTH')
+  cleanup()
+  localStorage.clear()
 })
