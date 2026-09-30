@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { assembleCloseoutEvidencePackage, authorizeProjectClosure, BrowserCloseoutPersistence, changeCloseoutRecipientPolicy, changedCloseoutContent, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, compareFinalAccountAdjustment, currentRecipientContentScope, getCloseoutDocumentHistory, getCloseoutHandoffStatus, getFinalAccountAdjustmentReadiness, getFinalAccountHistory, initialCloseoutPortfolioState, prepareCloseoutHandoff, proposeCategorizedFinalAccountAdjustment, proposeFinalAccountAdjustment, queryProjectCloseoutHistory, reassignCloseoutHandoff, recipientPackageChanges, recordCloseoutRecipientResponse, requiredCloseoutRecipients, reviewRecipientPackageSupersession, reviewFinalAccountAdjustment, scheduleCloseoutIntervention, substituteCloseoutRecipient, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
+import { acceptProjectHandover, captureProjectCloseoutArchive, getProjectHandoverAcceptance, parseProjectCloseoutArchive, previewProjectCloseoutRestore, assembleCloseoutEvidencePackage, authorizeProjectClosure, BrowserCloseoutPersistence, changeCloseoutRecipientPolicy, changedCloseoutContent, CloseoutControlError, CloseoutPortfolioRepository, closeoutPermissions, compareFinalAccountAdjustment, currentRecipientContentScope, getCloseoutDocumentHistory, getCloseoutHandoffStatus, getFinalAccountAdjustmentReadiness, getFinalAccountHistory, initialCloseoutPortfolioState, prepareCloseoutHandoff, proposeCategorizedFinalAccountAdjustment, proposeFinalAccountAdjustment, queryProjectCloseoutHistory, reassignCloseoutHandoff, recipientPackageChanges, recordCloseoutRecipientResponse, requiredCloseoutRecipients, reviewRecipientPackageSupersession, reviewFinalAccountAdjustment, scheduleCloseoutIntervention, substituteCloseoutRecipient, type CloseoutPersistence, type CloseoutPortfolioState } from './closeout-control-domain'
 
 it('pins preliminary closeout evidence and requires actual closure before a final package', () => { const command = { id: 'package-1', expectedRevision: 0, authority: 'Commercial Director' as const, projectId: 'PROJECT-SOUTH', status: 'preliminary' as const, assembledBy: 'director', assembledOn: '2026-10-25' }; expect(() => assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, { ...command, status: 'final' })).toThrow('completed closure'); expect(() => assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, { ...command, authority: 'Portfolio Viewer' })).toThrow('commercial director'); const first = assembleCloseoutEvidencePackage(initialCloseoutPortfolioState, command); expect(first.evidencePackages[0]).toMatchObject({ sourceRevision: 0, accountRevision: 0, openDocumentCount: 3, immutable: true }); const later = scheduleCloseoutIntervention(first, { id: 'intervention-2', expectedRevision: 1, authority: 'Commercial Director', projectId: 'PROJECT-SOUTH', assignedManager: 'director-closeout', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Commercial exposure and overdue documents require director intervention.' }); expect(later.evidencePackages[0]).toEqual(first.evidencePackages[0]); expect(() => assembleCloseoutEvidencePackage(later, { ...command, id: 'package-stale' })).toThrow('Refresh') })
 
@@ -191,4 +191,63 @@ it('versions recipient content scope and prevents a current acknowledgement from
   expect(() => changeCloseoutRecipientPolicy(acknowledged, { ...scopePolicy, id: 'scope-expansion', expectedRevision: acknowledged.revision, scopeByRecipient: { 'Client representative': ['final account', 'custody evidence'] } })).toThrow('cannot silently cover')
   expect(acknowledged.recipientResponses).toHaveLength(1)
   expect(new BrowserCloseoutPersistence({ getItem: () => JSON.stringify(scoped), setItem: () => undefined }).load()?.recipientPolicyRevisions[0]?.scopeByRecipient?.['Client representative']).toEqual(['final account'])
+})
+
+function recipientCompleteHandover() {
+  const active = scheduleCloseoutIntervention(initialCloseoutPortfolioState, command)
+  const closed = authorizeProjectClosure(active, { id: 'handover-closure', expectedRevision: active.revision, authority: 'Commercial Director', projectId: command.projectId, evidenceIds: ['DOC-1', 'DOC-2'], satisfiedDocuments: 2, waivedDocuments: 1, waiverAuthority: 'Commercial Director', waiverRationale: 'Minor training record accepted with retained exposure.', waivedExposureCents: 40_000, finalAccountReference: 'FA-FINAL', custodyReference: 'CUSTODY-1', authorizedBy: 'director', closedOn: '2026-10-24' })
+  let state = assembleCloseoutEvidencePackage(closed, { id: 'handover-package', expectedRevision: closed.revision, authority: 'Commercial Director', projectId: command.projectId, status: 'final', assembledBy: 'director', assembledOn: '2026-10-25' })
+  for (const [index, recipient] of requiredCloseoutRecipients.entries()) {
+    state = prepareCloseoutHandoff(state, { id: `accept-handoff-${String(index)}`, expectedRevision: state.revision, authority: 'Commercial Director', packageId: 'handover-package', recipient, preparedBy: 'director', preparedOn: '2026-10-26' })
+    state = recordCloseoutRecipientResponse(state, { id: `accept-response-${String(index)}`, expectedRevision: state.revision, authority: 'Commercial Director', handoffId: `accept-handoff-${String(index)}`, packageId: 'handover-package', recipient, decision: 'acknowledged', receiptReference: `REC-${String(index)}`, rationale: '', recordedBy: 'director', recordedOn: '2026-10-27' })
+  }
+  return state
+}
+
+it('accepts recipient-complete handover with pinned evidence and rejects unauthorized, stale or premature acceptance atomically', () => {
+  const state = recipientCompleteHandover()
+  const acceptance = { id: 'acceptance-1', expectedRevision: state.revision, authority: 'Commercial Director' as const, projectId: command.projectId, packageId: 'handover-package', acceptanceReference: 'HANDOVER-001', acceptedBy: 'director', acceptedOn: '2026-10-30' }
+  const before = structuredClone(state)
+  expect(() => acceptProjectHandover(state, { ...acceptance, authority: 'Portfolio Viewer' })).toThrow('commercial director')
+  expect(() => acceptProjectHandover(state, { ...acceptance, expectedRevision: state.revision - 1 })).toThrow('Refresh')
+  expect(() => acceptProjectHandover(state, { ...acceptance, acceptedOn: '2026-10-26' })).toThrow('date after')
+  const pending = structuredClone(state); pending.recipientResponses.pop()
+  expect(() => acceptProjectHandover(pending, acceptance)).toThrow('Main contractor: awaiting manual receipt')
+  expect(() => acceptProjectHandover(state, { ...acceptance, acceptedOn: '2026-11-31' })).toThrow('date after')
+  expect(() => acceptProjectHandover(state, { ...acceptance, id: '' })).toThrow('Acceptance reference')
+  expect(state).toEqual(before)
+  const accepted = acceptProjectHandover(state, acceptance)
+  expect(accepted.handoverAcceptances[0]).toMatchObject({ packageId: 'handover-package', obligations: [{ responseId: 'accept-response-0' }, { responseId: 'accept-response-1' }, { responseId: 'accept-response-2' }], immutable: true })
+  expect(getProjectHandoverAcceptance(accepted, command.projectId)).toMatchObject({ current: true, ready: false, status: 'handover accepted' })
+  expect(acceptProjectHandover(accepted, acceptance)).toBe(accepted)
+  expect(() => acceptProjectHandover(accepted, { ...acceptance, id: 'duplicate', expectedRevision: accepted.revision })).toThrow('already have')
+})
+
+it('new recipient policy supersedes handover acceptance without changing prior receipt or certificate evidence', () => {
+  const state = recipientCompleteHandover()
+  const accepted = acceptProjectHandover(state, { id: 'acceptance-2', expectedRevision: state.revision, authority: 'Commercial Director', projectId: command.projectId, packageId: 'handover-package', acceptanceReference: 'HANDOVER-002', acceptedBy: 'director', acceptedOn: '2026-10-30' })
+  const revised = changeCloseoutRecipientPolicy(accepted, { id: 'extra-recipient', expectedRevision: accepted.revision, authority: 'Commercial Director', projectId: command.projectId, packageId: 'handover-package', requiredRecipients: [...requiredCloseoutRecipients, 'Independent certifier'], reason: 'Independent handover certification now forms part of the accepted scope.', approvedBy: 'director', effectiveOn: '2026-10-30' })
+  expect(getProjectHandoverAcceptance(revised, command.projectId)).toMatchObject({ current: false, ready: false, status: 'acceptance superseded', outstanding: ['Independent certifier: not prepared'] })
+  expect(revised.handoverAcceptances).toEqual(accepted.handoverAcceptances)
+  expect(revised.recipientResponses).toEqual(accepted.recipientResponses)
+  const newPackage = assembleCloseoutEvidencePackage(accepted, { id: 'handover-package-2', expectedRevision: accepted.revision, authority: 'Commercial Director', projectId: command.projectId, status: 'final', assembledBy: 'director', assembledOn: '2026-10-31' })
+  expect(getProjectHandoverAcceptance(newPackage, command.projectId).current).toBe(false)
+  expect(newPackage.handoverAcceptances).toEqual(accepted.handoverAcceptances)
+})
+
+it('archives handover evidence and loads legacy persisted closeout without inventing acceptance', () => {
+  const state = recipientCompleteHandover()
+  const accepted = acceptProjectHandover(state, { id: 'acceptance-archive', expectedRevision: state.revision, authority: 'Commercial Director', projectId: command.projectId, packageId: 'handover-package', acceptanceReference: 'HANDOVER-003', acceptedBy: 'director', acceptedOn: '2026-10-30' })
+  const archive = captureProjectCloseoutArchive(accepted, { id: 'accepted-archive', projectId: command.projectId, authority: 'Commercial Director', createdOn: '2026-10-30' })
+  expect(parseProjectCloseoutArchive(JSON.stringify(archive)).handoverAcceptances).toEqual(accepted.handoverAcceptances)
+  expect(previewProjectCloseoutRestore(accepted, archive, command.projectId).ready).toBe(true)
+  const malformed = { ...archive, handoverAcceptances: [{ id: 'malformed' }] }
+  expect(() => parseProjectCloseoutArchive(JSON.stringify(malformed))).toThrow('handover acceptance history is invalid')
+  const foreign = structuredClone(archive)
+  foreign.handoverAcceptances![0]!.obligations[0]!.handoffId = 'accept-handoff-1'
+  expect(previewProjectCloseoutRestore(accepted, foreign, command.projectId).reasons).toContain('Handover acceptance evidence lineage is incomplete.')
+  archive.handoverAcceptances![0]!.obligations[0]!.responseId = 'missing-response'
+  expect(previewProjectCloseoutRestore(accepted, archive, command.projectId).reasons).toContain('Handover acceptance evidence lineage is incomplete.')
+  const legacy = { ...state, handoverAcceptances: undefined }
+  expect(new BrowserCloseoutPersistence({ getItem: () => JSON.stringify(legacy), setItem: () => undefined }).load()?.handoverAcceptances).toEqual([])
 })
